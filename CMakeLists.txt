@@ -1,41 +1,34 @@
 cmake_minimum_required(VERSION 3.15)
-project(${SKBUILD_PROJECT_NAME})
+project(libmbtiles LANGUAGES CXX C)
 
-# Set C++ standard
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Optimize for performance
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
-else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-endif()
-
-# Additional optimization flags for GCC/Clang
-# if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-#     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -mtune=native -fomit-frame-pointer -fno-stack-protector")
-# endif()
-
-# Set build type to Release for better performance
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
-
-
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
-
-# Find Python and Cython
-find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-
-# Create Python module
-# python_add_library(${SKBUILD_PROJECT_NAME} MODULE "${}" WITH_SOABI)
-
-file(GLOB_RECURSE SOURCES "src/sources/*.cpp")
-
-nanobind_add_module(c${PROJECT_NAME} MODULE ${SOURCES} WITH_SOABI)
-
-
-install(TARGETS c${PROJECT_NAME}
-    DESTINATION ${SKBUILD_PROJECT_NAME}
+add_library(mbtiles STATIC
+    src/lib/mbtiles.cpp
+    src/lib/sqlite3.c
 )
+
+target_include_directories(mbtiles
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/includes
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
+)
+
+if(UNIX)
+    target_link_libraries(mbtiles PRIVATE dl pthread)
+endif()
+
+add_executable(mbtiles-cli src/cli/main.cpp)
+
+target_include_directories(mbtiles-cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/includes
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
+)
+
+target_link_libraries(mbtiles-cli PRIVATE mbtiles)
+
+install(TARGETS mbtiles-cli DESTINATION bin)
+install(TARGETS mbtiles DESTINATION lib)
+install(DIRECTORY includes/ DESTINATION include)
