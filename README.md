@@ -86,9 +86,13 @@ Patterns may reference placeholders to build informative paths:
 | `{t}`, `{n}` | Latitude and longitude at the top-left corner of the tile (decimal degrees, 6 decimals). |
 | `{Z}`, `{X}`, `{Y}` | Zero-padded zoom/X/Y. Repeat the letter to control the width (`{ZZZ}` → 3 digits). |
 | `{T}`, `{N}` | Zero-padded leading digits of latitude/longitude. |
+| `{ext}` | File extension inferred from the MBTiles metadata `format` value (falls back to tile data when missing). |
 
-If the computed filename has no extension, libMBTILES detects the tile type and
-adds `.png`, `.jpg`, or `.webp` automatically.
+If the computed filename has no extension, libMBTILES prefers the metadata
+`format` value to determine the suffix and falls back to detecting the tile data
+(`.png`, `.jpg`, `.webp`, etc.).
+
+Use `.{ext}` inside the pattern when you need the dot before the extension.
 
 ### `convert-gray`
 

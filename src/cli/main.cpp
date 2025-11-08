@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     extract_cmd->add_option("-o,--output-dir", extract_output, "Destination directory for the extracted tiles")
         ->default_val(".");
     extract_cmd->add_option("-p,--pattern", extract_pattern,
-                             "Output filename pattern using placeholders like {z}, {x}, {y}, {t}, {n}, {XX}.")
+                             "Output filename pattern using placeholders like {z}, {x}, {y}, {t}, {n}, {XX}, {ext}.")
         ->default_val("{z}/{x}/{y}.jpg");
     extract_cmd->add_flag("-v,--verbose", extract_verbose, "Enable verbose logging during extraction");
 

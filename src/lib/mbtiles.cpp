@@ -103,6 +103,65 @@ std::string detect_extension(const void *data, int size) {
     return ".bin";
 }
 
+std::string extension_without_dot(const std::string &ext) {
+    if (!ext.empty() && ext[0] == '.') {
+        return ext.substr(1);
+    }
+    return ext;
+}
+
+std::string ensure_dot_prefixed(const std::string &ext) {
+    if (ext.empty() || ext[0] == '.') {
+        return ext;
+    }
+    return "." + ext;
+}
+
+std::string normalize_extension_token(std::string value) {
+    auto is_not_space = [](unsigned char ch) { return !std::isspace(ch); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), is_not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), is_not_space).base(), value.end());
+
+    if (!value.empty() && value.front() == '.') {
+        value.erase(value.begin());
+    }
+
+    for (char &ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+
+    if (value == "jpeg") {
+        return "jpg";
+    }
+    return value;
+}
+
+std::string read_metadata_format_extension(sqlite3 *db) {
+    if (db == nullptr) {
+        return {};
+    }
+
+    const char *query = "SELECT value FROM metadata WHERE name='format' LIMIT 1";
+    sqlite3_stmt *raw_stmt = nullptr;
+    if (sqlite3_prepare_v2(db, query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+        if (raw_stmt != nullptr) {
+            sqlite3_finalize(raw_stmt);
+        }
+        return {};
+    }
+
+    std::unique_ptr<sqlite3_stmt, stmt_deleter> stmt(raw_stmt);
+    const int rc = sqlite3_step(stmt.get());
+    if (rc == SQLITE_ROW) {
+        const unsigned char *text = sqlite3_column_text(stmt.get(), 0);
+        if (text != nullptr) {
+            return normalize_extension_token(reinterpret_cast<const char *>(text));
+        }
+    }
+
+    return {};
+}
+
 double tile_x_to_lon(int x, int z) {
     const double n = static_cast<double>(x) / static_cast<double>(1LL << z);
     return n * 360.0 - 180.0;
@@ -149,7 +208,7 @@ bool token_is_repeat_of(const std::string &token, char expected) {
     return true;
 }
 
-std::string format_pattern(int z, int x, int y, const std::string &pattern) {
+std::string format_pattern(int z, int x, int y, const std::string &pattern, const std::string &extension) {
     const double lon = tile_x_to_lon(x, z);
     const double lat = tile_y_to_lat(y, z);
 
@@ -195,6 +254,8 @@ std::string format_pattern(int z, int x, int y, const std::string &pattern) {
             replacement = leading_digits_from_double(lat, token.size());
         } else if (token_is_repeat_of(token, 'N')) {
             replacement = leading_digits_from_double(lon, token.size());
+        } else if (token == "ext") {
+            replacement = extension;
         } else {
             throw mbtiles_error("Unknown placeholder '{" + token + "}' in pattern: " + pattern);
         }
@@ -290,6 +351,8 @@ std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &optio
         throw mbtiles_error("Failed to create output directory '" + output_root.string() + "': " + ec.message());
     }
 
+    const std::string metadata_extension = read_metadata_format_extension(db.get());
+
     sqlite3_stmt *raw_stmt = nullptr;
     const char *query = "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles";
     if (sqlite3_prepare_v2(db.get(), query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
@@ -325,11 +388,21 @@ std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &optio
         const void *blob = sqlite3_column_blob(stmt.get(), 3);
         const int blob_size = sqlite3_column_bytes(stmt.get(), 3);
 
-        std::string relative_path = format_pattern(z, x, static_cast<int>(xyz_y), options.pattern);
+        const bool has_metadata_extension = !metadata_extension.empty();
+        std::string detected_extension;
+        if (!has_metadata_extension) {
+            detected_extension = detect_extension(blob, blob_size);
+        }
+
+        const std::string extension_token = has_metadata_extension ? metadata_extension
+                                                                   : extension_without_dot(detected_extension);
+
+        std::string relative_path = format_pattern(z, x, static_cast<int>(xyz_y), options.pattern, extension_token);
         fs::path output_path = output_root / fs::path(relative_path);
 
-        const std::string extension = detect_extension(blob, blob_size);
-        if (output_path.extension().empty()) {
+        const std::string extension = has_metadata_extension ? ensure_dot_prefixed(metadata_extension)
+                                                             : detected_extension;
+        if (output_path.extension().empty() && !extension.empty()) {
             output_path += extension;
         }
 
