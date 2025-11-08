@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(mbtiles STATIC
     src/lib/mbtiles.cpp
+    src/lib/mbtiles_viewer.cpp
     src/lib/sqlite3.c
 )
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,13 @@ void write_metadata_entry(const std::string &mbtiles_path, const std::string &ke
                           bool overwrite_existing = true);
 
 std::vector<std::string> metadata_keys(const std::string &mbtiles_path);
+
+struct ViewerOptions {
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 8080;
+};
+
+void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options = {});
 
 }  // namespace mbtiles
 

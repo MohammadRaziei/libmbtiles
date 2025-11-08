@@ -1,6 +1,7 @@
 #include "CLI11.hpp"
 #include "mbtiles.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -92,6 +93,19 @@ int main(int argc, char **argv) {
     metadata_set_cmd->add_flag("--no-overwrite", metadata_no_overwrite,
                                 "Fail if the key already exists instead of overwriting");
 
+    auto viewer_cmd = app.add_subcommand("view", "Launch a local web viewer for an MBTiles archive");
+    std::string viewer_path;
+    std::string viewer_host = "127.0.0.1";
+    std::uint16_t viewer_port = 8080;
+
+    viewer_cmd->add_option("mbtiles", viewer_path, "Path to the MBTiles file")
+        ->required()
+        ->check(CLI::ExistingFile);
+    viewer_cmd->add_option("--host", viewer_host, "Host/IP address to bind the viewer server")
+        ->default_val("127.0.0.1");
+    viewer_cmd->add_option("-p,--port", viewer_port, "Port to bind the viewer server")
+        ->default_val(8080);
+
     CLI11_PARSE(app, argc, argv);
 
     try {
@@ -145,6 +159,14 @@ int main(int argc, char **argv) {
         if (*metadata_set_cmd) {
             mbtiles::write_metadata_entry(metadata_set_path, metadata_set_key, metadata_set_value,
                                           !metadata_no_overwrite);
+            return EXIT_SUCCESS;
+        }
+
+        if (*viewer_cmd) {
+            mbtiles::ViewerOptions options;
+            options.host = viewer_host;
+            options.port = viewer_port;
+            mbtiles::serve_viewer(viewer_path, options);
             return EXIT_SUCCESS;
         }
     } catch (const std::exception &ex) {
