@@ -166,6 +166,9 @@ int main(int argc, char **argv) {
             mbtiles::ViewerOptions options;
             options.host = viewer_host;
             options.port = viewer_port;
+            std::cout << "Launching viewer for '" << viewer_path << "' at http://" << options.host << ":"
+                      << options.port << std::endl;
+            std::cout << "Press Ctrl+C to stop the server." << std::endl;
             mbtiles::serve_viewer(viewer_path, options);
             return EXIT_SUCCESS;
         }

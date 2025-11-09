@@ -141,6 +141,23 @@ mbtiles-cli metadata <list|get|set> ...
   metadata entry. With `--no-overwrite`, the command fails if the key already
   exists.
 
+### `view`
+
+Serve a lightweight leaflet-based viewer for an MBTiles archive. The command
+starts a small HTTP server that renders the tiles directly from the database.
+
+```
+mbtiles-cli view <mbtiles> [--host <host>] [--port <port>]
+```
+
+- `mbtiles` – Path to the MBTiles file to preview. Must exist.
+- `--host` – IP address or hostname to bind. Defaults to `127.0.0.1`.
+- `-p`, `--port` – TCP port for the HTTP server. Defaults to `8080`.
+
+When the server starts it prints the local URL (for example
+`http://127.0.0.1:8080`). Visit it in your browser to inspect the tiles. Use
+`Ctrl+C` to stop the server.
+
 ### Exit codes
 
 All subcommands return `0` on success. Non-zero exit codes are accompanied by an
