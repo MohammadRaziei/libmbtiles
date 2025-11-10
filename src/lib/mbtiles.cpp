@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -285,6 +286,22 @@ image_data load_image_rgba(const fs::path &path) {
     return image;
 }
 
+image_data load_image_rgba_from_memory(const unsigned char *data, int size) {
+    if (data == nullptr || size <= 0) {
+        throw mbtiles_error("Tile image data is empty");
+    }
+
+    image_data image;
+    int components = 0;
+    unsigned char *raw = stbi_load_from_memory(data, size, &image.width, &image.height, &components, 4);
+    if (raw == nullptr) {
+        throw mbtiles_error("Failed to decode image from MBTiles blob");
+    }
+    image.pixels.assign(raw, raw + static_cast<std::size_t>(image.width) * image.height * 4);
+    stbi_image_free(raw);
+    return image;
+}
+
 void save_image_rgba(const fs::path &path, const unsigned char *data, int width, int height) {
     const std::string ext = path.extension().string();
     if (path.has_parent_path()) {
@@ -322,6 +339,23 @@ void save_image_rgba(const fs::path &path, const unsigned char *data, int width,
     }
 }
 
+std::vector<unsigned char> encode_png_rgba(const unsigned char *data, int width, int height) {
+    std::vector<unsigned char> buffer;
+    buffer.reserve(static_cast<std::size_t>(width) * height);
+
+    auto callback = [](void *context, void *data_ptr, int size) {
+        auto *destination = static_cast<std::vector<unsigned char> *>(context);
+        const auto *bytes = static_cast<unsigned char *>(data_ptr);
+        destination->insert(destination->end(), bytes, bytes + size);
+    };
+
+    if (stbi_write_png_to_func(callback, &buffer, width, height, 4, data, width * 4) == 0) {
+        throw mbtiles_error("Failed to encode tile as PNG");
+    }
+
+    return buffer;
+}
+
 void convert_pixels_to_grayscale(std::vector<unsigned char> &pixels) {
     if (pixels.empty()) {
         return;
@@ -337,6 +371,171 @@ void convert_pixels_to_grayscale(std::vector<unsigned char> &pixels) {
         pixels[index + 1] = gray;
         pixels[index + 2] = gray;
     }
+}
+
+int tms_to_xyz_y(int tms_y, int z) {
+    const auto value = static_cast<long long>((1LL << z) - 1) - static_cast<long long>(tms_y);
+    if (value < 0 || value > std::numeric_limits<int>::max()) {
+        throw mbtiles_error("Tile row is outside representable range for zoom level " + std::to_string(z));
+    }
+    return static_cast<int>(value);
+}
+
+int xyz_to_tms_y(int xyz_y, int z) {
+    const long long max_value = (1LL << z) - 1;
+    const long long result = max_value - static_cast<long long>(xyz_y);
+    if (result < 0 || result > std::numeric_limits<int>::max()) {
+        throw mbtiles_error("Tile row is outside representable range for zoom level " + std::to_string(z));
+    }
+    return static_cast<int>(result);
+}
+
+std::vector<int> collect_zoom_levels(sqlite3 *db) {
+    const char *query = "SELECT DISTINCT zoom_level FROM tiles ORDER BY zoom_level";
+    sqlite3_stmt *raw_stmt = nullptr;
+    if (sqlite3_prepare_v2(db, query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to enumerate zoom levels: " + std::string(sqlite3_errmsg(db)));
+    }
+
+    std::unique_ptr<sqlite3_stmt, stmt_deleter> stmt(raw_stmt);
+    std::vector<int> levels;
+    while (true) {
+        const int rc = sqlite3_step(stmt.get());
+        if (rc == SQLITE_DONE) {
+            break;
+        }
+        if (rc != SQLITE_ROW) {
+            throw mbtiles_error("SQLite error while reading zoom levels: " + std::string(sqlite3_errmsg(db)));
+        }
+        levels.push_back(sqlite3_column_int(stmt.get(), 0));
+    }
+    return levels;
+}
+
+using TileKey = std::uint64_t;
+
+TileKey make_tile_key(int x, int y) {
+    return (static_cast<TileKey>(static_cast<std::uint32_t>(x)) << 32) |
+           static_cast<TileKey>(static_cast<std::uint32_t>(y));
+}
+
+int tile_key_x(TileKey key) {
+    return static_cast<int>(key >> 32);
+}
+
+int tile_key_y(TileKey key) {
+    return static_cast<int>(key & 0xFFFFFFFFu);
+}
+
+using TileMap = std::unordered_map<TileKey, image_data>;
+
+TileMap load_level_rgba(sqlite3 *db, int zoom) {
+    const char *query = "SELECT tile_column, tile_row, tile_data FROM tiles WHERE zoom_level=?";
+    sqlite3_stmt *raw_stmt = nullptr;
+    if (sqlite3_prepare_v2(db, query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to read tiles for zoom level " + std::to_string(zoom) + ": " +
+                            std::string(sqlite3_errmsg(db)));
+    }
+
+    std::unique_ptr<sqlite3_stmt, stmt_deleter> stmt(raw_stmt);
+    TileMap tiles;
+
+    while (true) {
+        const int rc = sqlite3_step(stmt.get());
+        if (rc == SQLITE_DONE) {
+            break;
+        }
+        if (rc != SQLITE_ROW) {
+            throw mbtiles_error("SQLite error while reading tiles: " + std::string(sqlite3_errmsg(db)));
+        }
+
+        const int x = sqlite3_column_int(stmt.get(), 0);
+        const int tms_y = sqlite3_column_int(stmt.get(), 1);
+        const void *blob = sqlite3_column_blob(stmt.get(), 2);
+        const int blob_size = sqlite3_column_bytes(stmt.get(), 2);
+
+        const int y = tms_to_xyz_y(tms_y, zoom);
+        image_data image = load_image_rgba_from_memory(static_cast<const unsigned char *>(blob), blob_size);
+        tiles.emplace(make_tile_key(x, y), std::move(image));
+    }
+
+    return tiles;
+}
+
+TileMap downsample_level(const TileMap &source_tiles, int source_zoom) {
+    struct ParentGroup {
+        std::array<bool, 4> present = {false, false, false, false};
+        std::array<image_data, 4> images;
+    };
+
+    std::unordered_map<TileKey, ParentGroup> groups;
+    for (const auto &entry : source_tiles) {
+        const int x = tile_key_x(entry.first);
+        const int y = tile_key_y(entry.first);
+        const int parent_x = x / 2;
+        const int parent_y = y / 2;
+        const int idx = (y % 2) * 2 + (x % 2);
+
+        auto &group = groups[make_tile_key(parent_x, parent_y)];
+        group.present[idx] = true;
+        group.images[idx] = entry.second;
+    }
+
+    TileMap result;
+    for (const auto &item : groups) {
+        const ParentGroup &group = item.second;
+        if (!std::all_of(group.present.begin(), group.present.end(), [](bool value) { return value; })) {
+            continue;
+        }
+
+        const int child_width = group.images[0].width;
+        const int child_height = group.images[0].height;
+        if (child_width <= 0 || child_height <= 0) {
+            continue;
+        }
+
+        bool consistent = true;
+        for (const auto &img : group.images) {
+            if (img.width != child_width || img.height != child_height) {
+                consistent = false;
+                break;
+            }
+        }
+        if (!consistent) {
+            continue;
+        }
+
+        const int canvas_width = child_width * 2;
+        const int canvas_height = child_height * 2;
+        std::vector<unsigned char> canvas(static_cast<std::size_t>(canvas_width) * canvas_height * 4, 0);
+
+        for (std::size_t idx = 0; idx < group.images.size(); ++idx) {
+            const int offset_x = static_cast<int>(idx % 2) * child_width;
+            const int offset_y = static_cast<int>(idx / 2) * child_height;
+            const image_data &img = group.images[idx];
+
+            for (int row = 0; row < child_height; ++row) {
+                unsigned char *dest = canvas.data() + ((offset_y + row) * canvas_width + offset_x) * 4;
+                const unsigned char *src = img.pixels.data() + static_cast<std::size_t>(row) * child_width * 4;
+                std::memcpy(dest, src, static_cast<std::size_t>(child_width) * 4);
+            }
+        }
+
+        std::vector<unsigned char> resized(static_cast<std::size_t>(child_width) * child_height * 4, 0);
+        if (!stbir_resize_uint8_linear(canvas.data(), canvas_width, canvas_height, canvas_width * 4, resized.data(),
+                                       child_width, child_height, child_width * 4, STBIR_RGBA)) {
+            throw mbtiles_error("Failed to downsample tiles at zoom " + std::to_string(source_zoom));
+        }
+
+        image_data parent_image;
+        parent_image.width = child_width;
+        parent_image.height = child_height;
+        parent_image.pixels = std::move(resized);
+
+        result.emplace(item.first, std::move(parent_image));
+    }
+
+    return result;
 }
 
 }  // namespace
@@ -494,181 +693,366 @@ void convert_directory_to_grayscale(const std::string &input_directory, const st
     }
 }
 
-void decrease_zoom_level(const std::string &input_directory, const std::string &output_directory,
+std::vector<int> list_zoom_levels(const std::string &mbtiles_path) {
+    auto db = open_database(mbtiles_path);
+    return collect_zoom_levels(db.get());
+}
+
+void decrease_zoom_level(const std::string &input_mbtiles, const std::string &output_path,
                          const DecreaseZoomOptions &options) {
-    fs::path input_root = input_directory;
-    fs::path output_root = output_directory;
-
-    if (!fs::exists(input_root)) {
-        throw mbtiles_error("Input directory does not exist: " + input_root.string());
-    }
-    if (!fs::is_directory(input_root)) {
-        throw mbtiles_error("Input path is not a directory: " + input_root.string());
+    auto db = open_database(input_mbtiles);
+    const std::vector<int> available_levels = collect_zoom_levels(db.get());
+    if (available_levels.empty()) {
+        throw mbtiles_error("No tiles found in MBTiles archive: " + input_mbtiles);
     }
 
-    int max_zoom = -1;
-    for (const auto &entry : fs::directory_iterator(input_root)) {
-        if (!entry.is_directory()) {
+    std::vector<int> requested_levels = options.target_levels;
+    std::unordered_set<int> generate_set(options.generated_levels.begin(), options.generated_levels.end());
+
+    const int max_zoom = *std::max_element(available_levels.begin(), available_levels.end());
+    if (requested_levels.empty()) {
+        if (max_zoom <= 0) {
+            throw mbtiles_error("Cannot decrease zoom level because maximum zoom is " + std::to_string(max_zoom));
+        }
+        requested_levels.push_back(max_zoom - 1);
+        generate_set.insert(max_zoom - 1);
+    }
+
+    std::vector<int> unique_levels;
+    std::unordered_set<int> seen_levels;
+    for (int level : requested_levels) {
+        if (level < 0) {
+            throw mbtiles_error("Zoom levels must be non-negative after CLI normalization");
+        }
+        if (seen_levels.insert(level).second) {
+            unique_levels.push_back(level);
+        }
+    }
+    requested_levels = std::move(unique_levels);
+
+    std::unordered_set<int> available_set(available_levels.begin(), available_levels.end());
+
+    fs::path destination_path = output_path;
+    bool output_is_directory = false;
+    if (fs::exists(destination_path)) {
+        if (fs::is_directory(destination_path)) {
+            output_is_directory = true;
+        } else {
+            if (!equals_ignore_case(destination_path.extension().string(), ".mbtiles")) {
+                throw mbtiles_error("Output path must be a directory or a .mbtiles file");
+            }
+        }
+    } else {
+        if (destination_path.has_extension()) {
+            if (!equals_ignore_case(destination_path.extension().string(), ".mbtiles")) {
+                throw mbtiles_error("Only directories or .mbtiles files are supported as decrease-zoom outputs");
+            }
+        } else {
+            output_is_directory = true;
+        }
+    }
+
+    if (output_is_directory) {
+        std::error_code ec;
+        fs::create_directories(destination_path, ec);
+        if (ec) {
+            throw mbtiles_error("Failed to create output directory '" + destination_path.string() + "': " + ec.message());
+        }
+    } else if (destination_path.has_parent_path()) {
+        std::error_code ec;
+        fs::create_directories(destination_path.parent_path(), ec);
+        if (ec) {
+            throw mbtiles_error("Failed to create parent directory '" + destination_path.parent_path().string() + "': " +
+                                ec.message());
+        }
+    }
+
+    const std::string metadata_extension = read_metadata_format_extension(db.get());
+
+    std::vector<int> copy_levels;
+    for (int level : requested_levels) {
+        if (generate_set.count(level) > 0) {
             continue;
         }
-        try {
-            int z = std::stoi(entry.path().filename().string());
-            max_zoom = std::max(max_zoom, z);
-        } catch (const std::exception &) {
-            continue;
+        if (available_set.count(level) > 0) {
+            copy_levels.push_back(level);
+        } else {
+            std::cerr << "Warning: zoom level " << level << " is not present in the source archive and will be skipped"
+                      << std::endl;
         }
     }
 
-    if (max_zoom <= 0) {
-        throw mbtiles_error("Unable to determine maximum zoom level in " + input_root.string());
+    std::vector<int> generate_levels(generate_set.begin(), generate_set.end());
+    std::sort(generate_levels.begin(), generate_levels.end(), std::greater<int>());
+
+    std::unordered_map<int, TileMap> tile_cache;
+
+    auto ensure_level_tiles = [&](int level) -> TileMap & {
+        auto it = tile_cache.find(level);
+        if (it != tile_cache.end()) {
+            return it->second;
+        }
+        if (!available_set.count(level)) {
+            throw mbtiles_error("Zoom level " + std::to_string(level) +
+                                " is required for downsampling but is not available");
+        }
+        TileMap tiles = load_level_rgba(db.get(), level);
+        auto inserted = tile_cache.emplace(level, std::move(tiles));
+        return inserted.first->second;
+    };
+
+    auto apply_grayscale_to_tiles = [&](TileMap &tiles) {
+        if (!options.grayscale) {
+            return;
+        }
+        for (auto &entry : tiles) {
+            convert_pixels_to_grayscale(entry.second.pixels);
+        }
+    };
+
+    for (int level : generate_levels) {
+        const int source_level = level + 1;
+        TileMap &source_tiles = ensure_level_tiles(source_level);
+        TileMap generated = downsample_level(source_tiles, source_level);
+        apply_grayscale_to_tiles(generated);
+        tile_cache[level] = std::move(generated);
     }
 
-    const int new_zoom = max_zoom - 1;
-    fs::path highest_zoom_dir = input_root / std::to_string(max_zoom);
-    if (!fs::exists(highest_zoom_dir) || !fs::is_directory(highest_zoom_dir)) {
-        throw mbtiles_error("Missing directory for zoom level " + std::to_string(max_zoom));
+    if (!generate_levels.empty() && options.verbose) {
+        std::cout << "Generated zoom levels:";
+        for (int level : generate_levels) {
+            std::cout << ' ' << level;
+        }
+        std::cout << std::endl;
     }
 
-    std::error_code ec;
-    fs::create_directories(output_root / std::to_string(new_zoom), ec);
-    if (ec) {
-        throw mbtiles_error("Failed to prepare output directory: " + ec.message());
-    }
+    if (output_is_directory) {
+        const fs::path base = destination_path;
 
-    std::map<std::pair<int, int>, fs::path> tiles;
-    for (const auto &x_entry : fs::directory_iterator(highest_zoom_dir)) {
-        if (!x_entry.is_directory()) {
-            continue;
+        auto write_blob_tile = [&](int z, int x, int tms_y, const void *blob, int blob_size) {
+            const int y = tms_to_xyz_y(tms_y, z);
+            const bool has_metadata_extension = !metadata_extension.empty();
+            std::string detected_extension;
+            if (!has_metadata_extension) {
+                detected_extension = detect_extension(blob, blob_size);
+            }
+            const std::string extension_token = has_metadata_extension ? metadata_extension
+                                                                       : extension_without_dot(detected_extension);
+            std::string relative_path = format_pattern(z, x, y, options.pattern, extension_token);
+            fs::path output_file = base / fs::path(relative_path);
+
+            const std::string extension = has_metadata_extension ? ensure_dot_prefixed(metadata_extension)
+                                                                 : detected_extension;
+            if (output_file.extension().empty() && !extension.empty()) {
+                output_file += extension;
+            }
+
+            if (options.grayscale) {
+                if (blob == nullptr || blob_size <= 0) {
+                    throw mbtiles_error("Tile data is empty; cannot convert to grayscale");
+                }
+                image_data image =
+                    load_image_rgba_from_memory(static_cast<const unsigned char *>(blob), blob_size);
+                convert_pixels_to_grayscale(image.pixels);
+                fs::path destination = output_file;
+                const std::string current_extension = destination.extension().string();
+                if (current_extension.empty() ||
+                    (!equals_ignore_case(current_extension, ".png") && !equals_ignore_case(current_extension, ".jpg") &&
+                     !equals_ignore_case(current_extension, ".jpeg"))) {
+                    destination.replace_extension(".png");
+                }
+                save_image_rgba(destination, image.pixels.data(), image.width, image.height);
+                return;
+            }
+
+            std::error_code ec;
+            fs::create_directories(output_file.parent_path(), ec);
+            if (ec) {
+                throw mbtiles_error("Failed to create directory '" + output_file.parent_path().string() + "': " +
+                                    ec.message());
+            }
+
+            std::ofstream file(output_file, std::ios::binary);
+            if (!file) {
+                throw mbtiles_error("Failed to open output file '" + output_file.string() + "'");
+            }
+            if (blob != nullptr && blob_size > 0) {
+                file.write(static_cast<const char *>(blob), blob_size);
+            }
+            if (!file) {
+                throw mbtiles_error("Failed to write tile to '" + output_file.string() + "'");
+            }
+        };
+
+        for (int level : copy_levels) {
+            sqlite3_stmt *raw_stmt = nullptr;
+            const char *select_sql = "SELECT tile_column, tile_row, tile_data FROM tiles WHERE zoom_level=?";
+            if (sqlite3_prepare_v2(db.get(), select_sql, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+                throw mbtiles_error("Failed to read tiles for zoom level " + std::to_string(level) + ": " +
+                                    std::string(sqlite3_errmsg(db.get())));
+            }
+
+            std::unique_ptr<sqlite3_stmt, stmt_deleter> stmt(raw_stmt);
+            while (true) {
+                const int rc = sqlite3_step(stmt.get());
+                if (rc == SQLITE_DONE) {
+                    break;
+                }
+                if (rc != SQLITE_ROW) {
+                    throw mbtiles_error("SQLite error while reading tiles: " + std::string(sqlite3_errmsg(db.get())));
+                }
+
+                const int x = sqlite3_column_int(stmt.get(), 0);
+                const int tms_y = sqlite3_column_int(stmt.get(), 1);
+                const void *blob = sqlite3_column_blob(stmt.get(), 2);
+                const int blob_size = sqlite3_column_bytes(stmt.get(), 2);
+                write_blob_tile(level, x, tms_y, blob, blob_size);
+            }
         }
 
-        int x_value = 0;
-        try {
-            x_value = std::stoi(x_entry.path().filename().string());
-        } catch (const std::exception &) {
-            continue;
-        }
-
-        for (const auto &y_entry : fs::directory_iterator(x_entry.path())) {
-            if (!y_entry.is_regular_file()) {
+        for (int level : generate_levels) {
+            auto cache_it = tile_cache.find(level);
+            if (cache_it == tile_cache.end()) {
                 continue;
             }
-
-            int y_value = 0;
-            try {
-                y_value = std::stoi(y_entry.path().stem().string());
-            } catch (const std::exception &) {
-                continue;
+            const TileMap &tiles = cache_it->second;
+            for (const auto &entry : tiles) {
+                const int x = tile_key_x(entry.first);
+                const int y = tile_key_y(entry.first);
+                const std::string extension_token = "png";
+                std::string relative_path = format_pattern(level, x, y, options.pattern, extension_token);
+                fs::path output_file = base / fs::path(relative_path);
+                if (output_file.extension().empty()) {
+                    output_file += ".png";
+                }
+                save_image_rgba(output_file, entry.second.pixels.data(), entry.second.width, entry.second.height);
             }
-
-            tiles.emplace(std::make_pair(x_value, y_value), y_entry.path());
         }
+        return;
     }
 
-    if (tiles.empty()) {
-        throw mbtiles_error("No tiles found at zoom level " + std::to_string(max_zoom));
+    // MBTiles output
+    sqlite3 *raw_out_db = nullptr;
+    if (sqlite3_open(destination_path.string().c_str(), &raw_out_db) != SQLITE_OK) {
+        std::string message = "Unable to create output MBTiles file: " + destination_path.string();
+        if (raw_out_db != nullptr) {
+            message += ": ";
+            message += sqlite3_errmsg(raw_out_db);
+            sqlite3_close(raw_out_db);
+        }
+        throw mbtiles_error(message);
+    }
+    std::unique_ptr<sqlite3, sqlite_deleter> out_db(raw_out_db);
+
+    const char *create_tiles_sql =
+        "CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)";
+    if (sqlite3_exec(out_db.get(), create_tiles_sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to create tiles table: " + std::string(sqlite3_errmsg(out_db.get())));
+    }
+    const char *index_sql =
+        "CREATE UNIQUE INDEX IF NOT EXISTS tiles_index ON tiles (zoom_level, tile_column, tile_row)";
+    if (sqlite3_exec(out_db.get(), index_sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to create tiles index: " + std::string(sqlite3_errmsg(out_db.get())));
     }
 
-    std::set<std::pair<int, int>> parents;
-    for (const auto &item : tiles) {
-        parents.emplace(item.first.first / 2, item.first.second / 2);
+    if (sqlite3_exec(out_db.get(), "BEGIN IMMEDIATE TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to begin transaction: " + std::string(sqlite3_errmsg(out_db.get())));
     }
 
-    std::size_t processed = 0;
-    for (const auto &parent : parents) {
-        const std::array<std::pair<int, int>, 4> children = {{{parent.first * 2, parent.second * 2},
-                                                              {parent.first * 2 + 1, parent.second * 2},
-                                                              {parent.first * 2, parent.second * 2 + 1},
-                                                              {parent.first * 2 + 1, parent.second * 2 + 1}}};
+    sqlite3_stmt *insert_stmt_raw = nullptr;
+    const char *insert_sql = "INSERT OR REPLACE INTO tiles(zoom_level, tile_column, tile_row, tile_data) VALUES(?1, ?2, ?3, ?4)";
+    if (sqlite3_prepare_v2(out_db.get(), insert_sql, -1, &insert_stmt_raw, nullptr) != SQLITE_OK) {
+        sqlite3_exec(out_db.get(), "ROLLBACK", nullptr, nullptr, nullptr);
+        throw mbtiles_error("Failed to prepare insert statement: " + std::string(sqlite3_errmsg(out_db.get())));
+    }
+    std::unique_ptr<sqlite3_stmt, stmt_deleter> insert_stmt(insert_stmt_raw);
 
-        std::array<image_data, 4> images;
-        bool missing_child = false;
-        std::string extension;
+    auto insert_tile = [&](int z, int x, int tms_y, const void *data_ptr, int data_size) {
+        sqlite3_reset(insert_stmt.get());
+        sqlite3_clear_bindings(insert_stmt.get());
+        sqlite3_bind_int(insert_stmt.get(), 1, z);
+        sqlite3_bind_int(insert_stmt.get(), 2, x);
+        sqlite3_bind_int(insert_stmt.get(), 3, tms_y);
+        sqlite3_bind_blob(insert_stmt.get(), 4, data_ptr, data_size, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(insert_stmt.get());
+        if (rc != SQLITE_DONE) {
+            throw mbtiles_error("Failed to write tile to output MBTiles: " + std::string(sqlite3_errmsg(out_db.get())));
+        }
+    };
 
-        for (std::size_t idx = 0; idx < children.size(); ++idx) {
-            const auto it = tiles.find(children[idx]);
-            if (it == tiles.end()) {
-                missing_child = true;
+    for (int level : copy_levels) {
+        sqlite3_stmt *raw_stmt = nullptr;
+        const char *select_sql = "SELECT tile_column, tile_row, tile_data FROM tiles WHERE zoom_level=?";
+        if (sqlite3_prepare_v2(db.get(), select_sql, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+            sqlite3_exec(out_db.get(), "ROLLBACK", nullptr, nullptr, nullptr);
+            throw mbtiles_error("Failed to read tiles for zoom level " + std::to_string(level) + ": " +
+                                std::string(sqlite3_errmsg(db.get())));
+        }
+
+        std::unique_ptr<sqlite3_stmt, stmt_deleter> stmt(raw_stmt);
+        while (true) {
+            const int rc = sqlite3_step(stmt.get());
+            if (rc == SQLITE_DONE) {
                 break;
             }
-
-            if (extension.empty()) {
-                extension = it->second.extension().string();
+            if (rc != SQLITE_ROW) {
+                sqlite3_exec(out_db.get(), "ROLLBACK", nullptr, nullptr, nullptr);
+                throw mbtiles_error("SQLite error while reading tiles: " + std::string(sqlite3_errmsg(db.get())));
             }
 
-            try {
-                images[idx] = load_image_rgba(it->second);
-            } catch (const std::exception &) {
-                missing_child = true;
-                break;
+            const int x = sqlite3_column_int(stmt.get(), 0);
+            const int tms_y = sqlite3_column_int(stmt.get(), 1);
+            const void *blob = sqlite3_column_blob(stmt.get(), 2);
+            const int blob_size = sqlite3_column_bytes(stmt.get(), 2);
+            if (options.grayscale) {
+                if (blob == nullptr || blob_size <= 0) {
+                    throw mbtiles_error("Tile data is empty; cannot convert to grayscale");
+                }
+                image_data image =
+                    load_image_rgba_from_memory(static_cast<const unsigned char *>(blob), blob_size);
+                convert_pixels_to_grayscale(image.pixels);
+                const std::vector<unsigned char> png =
+                    encode_png_rgba(image.pixels.data(), image.width, image.height);
+                insert_tile(level, x, tms_y, png.data(), static_cast<int>(png.size()));
+            } else {
+                insert_tile(level, x, tms_y, blob, blob_size);
             }
-        }
-
-        if (missing_child) {
-            continue;
-        }
-
-        const int child_width = images[0].width;
-        const int child_height = images[0].height;
-        if (child_width <= 0 || child_height <= 0) {
-            continue;
-        }
-
-        for (const auto &img : images) {
-            if (img.width != child_width || img.height != child_height) {
-                missing_child = true;
-                break;
-            }
-        }
-
-        if (missing_child) {
-            continue;
-        }
-
-        const int canvas_width = child_width * 2;
-        const int canvas_height = child_height * 2;
-        std::vector<unsigned char> canvas(static_cast<std::size_t>(canvas_width) * canvas_height * 4, 0);
-
-        for (std::size_t idx = 0; idx < images.size(); ++idx) {
-            const int offset_x = static_cast<int>(idx % 2) * child_width;
-            const int offset_y = static_cast<int>(idx / 2) * child_height;
-            const auto &img = images[idx];
-
-            for (int row = 0; row < child_height; ++row) {
-                unsigned char *dest = canvas.data() + ((offset_y + row) * canvas_width + offset_x) * 4;
-                const unsigned char *src = img.pixels.data() + static_cast<std::size_t>(row) * child_width * 4;
-                std::memcpy(dest, src, static_cast<std::size_t>(child_width) * 4);
-            }
-        }
-
-        std::vector<unsigned char> resized(static_cast<std::size_t>(child_width) * child_height * 4, 0);
-        if (!stbir_resize_uint8_linear(canvas.data(), canvas_width, canvas_height, canvas_width * 4, resized.data(),
-                                       child_width, child_height, child_width * 4, STBIR_RGBA)) {
-            throw mbtiles_error("Failed to downsample tile group at (" + std::to_string(parent.first) + ", " +
-                                std::to_string(parent.second) + ")");
-        }
-
-        if (options.grayscale) {
-            convert_pixels_to_grayscale(resized);
-        }
-
-        std::string final_extension = options.force_png ? ".png" : extension;
-        if (final_extension.empty()) {
-            final_extension = ".png";
-        }
-
-        fs::path destination = output_root / std::to_string(new_zoom) / std::to_string(parent.first);
-        destination /= std::to_string(parent.second) + final_extension;
-        save_image_rgba(destination, resized.data(), child_width, child_height);
-
-        ++processed;
-        if (options.verbose && processed % 50 == 0) {
-            std::cout << "Generated " << processed << " tiles at zoom " << new_zoom << std::endl;
         }
     }
 
-    if (options.verbose) {
-        std::cout << "Finished generating tiles at zoom " << new_zoom << " (" << processed << " total)." << std::endl;
+    for (int level : generate_levels) {
+        auto cache_it = tile_cache.find(level);
+        if (cache_it == tile_cache.end()) {
+            continue;
+        }
+        const TileMap &tiles = cache_it->second;
+        for (const auto &entry : tiles) {
+            const int x = tile_key_x(entry.first);
+            const int y = tile_key_y(entry.first);
+            const int tms_y = xyz_to_tms_y(y, level);
+            const std::vector<unsigned char> png =
+                encode_png_rgba(entry.second.pixels.data(), entry.second.width, entry.second.height);
+            insert_tile(level, x, tms_y, png.data(), static_cast<int>(png.size()));
+        }
     }
+
+    if (sqlite3_exec(out_db.get(), "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        throw mbtiles_error("Failed to commit tile data: " + std::string(sqlite3_errmsg(out_db.get())));
+    }
+
+    out_db.reset();
+
+    auto metadata = read_metadata(input_mbtiles);
+    if (!requested_levels.empty()) {
+        const int min_level = *std::min_element(requested_levels.begin(), requested_levels.end());
+        const int max_level_out = *std::max_element(requested_levels.begin(), requested_levels.end());
+        metadata["minzoom"] = std::to_string(min_level);
+        metadata["maxzoom"] = std::to_string(max_level_out);
+    }
+    if (options.grayscale) {
+        metadata["format"] = "png";
+    }
+    write_metadata_entries(destination_path.string(), metadata, true);
 }
 
 std::map<std::string, std::string> read_metadata(const std::string &mbtiles_path) {

@@ -16,7 +16,7 @@ public:
 
 struct ExtractOptions {
     std::string output_directory = ".";
-    std::string pattern = "{z}/{x}/{y}.jpg";
+    std::string pattern = "{z}/{x}/{y}.{ext}";
     bool verbose = false;
 };
 
@@ -26,9 +26,11 @@ struct GrayscaleOptions {
 };
 
 struct DecreaseZoomOptions {
-    bool grayscale = false;
-    bool force_png = false;
+    std::vector<int> target_levels;
+    std::vector<int> generated_levels;
+    std::string pattern = "{z}/{x}/{y}.{ext}";
     bool verbose = false;
+    bool grayscale = false;
 };
 
 std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &options = {});
@@ -36,7 +38,9 @@ std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &optio
 void convert_directory_to_grayscale(const std::string &input_directory, const std::string &output_directory,
                                     const GrayscaleOptions &options = {});
 
-void decrease_zoom_level(const std::string &input_directory, const std::string &output_directory,
+std::vector<int> list_zoom_levels(const std::string &mbtiles_path);
+
+void decrease_zoom_level(const std::string &input_mbtiles, const std::string &output_path,
                          const DecreaseZoomOptions &options = {});
 
 std::map<std::string, std::string> read_metadata(const std::string &mbtiles_path);

@@ -1,11 +1,13 @@
 #include "CLI11.hpp"
 #include "mbtiles.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
-#include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 int main(int argc, char **argv) {
@@ -16,7 +18,7 @@ int main(int argc, char **argv) {
 
     std::string extract_input;
     std::string extract_output = ".";
-    std::string extract_pattern = "{z}/{x}/{y}.jpg";
+    std::string extract_pattern = "{z}/{x}/{y}.{ext}";
     bool extract_verbose = false;
 
     extract_cmd->add_option("mbtiles", extract_input, "Path to the MBTiles file")
@@ -26,7 +28,7 @@ int main(int argc, char **argv) {
         ->default_val(".");
     extract_cmd->add_option("-p,--pattern", extract_pattern,
                              "Output filename pattern using placeholders like {z}, {x}, {y}, {t}, {n}, {XX}, {ext}.")
-        ->default_val("{z}/{x}/{y}.jpg");
+        ->default_val("{z}/{x}/{y}.{ext}");
     extract_cmd->add_flag("-v,--verbose", extract_verbose, "Enable verbose logging during extraction");
 
     auto grayscale_cmd = app.add_subcommand("convert-gray", "Convert a directory of tiles to grayscale");
@@ -43,21 +45,32 @@ int main(int argc, char **argv) {
     grayscale_cmd->add_flag("--no-recursive", gray_no_recursive, "Only process files in the top-level directory");
     grayscale_cmd->add_flag("-v,--verbose", gray_verbose, "Print each converted file");
 
-    auto decrease_cmd = app.add_subcommand("decrease-zoom", "Down-sample the highest zoom level into the next level");
+    auto decrease_cmd = app.add_subcommand("decrease-zoom",
+                                           "Generate lower zoom levels from an MBTiles archive or copy specific levels");
     std::string decrease_input;
     std::string decrease_output;
-    bool decrease_grayscale = false;
-    bool decrease_force_png = false;
+    std::vector<int> decrease_levels;
+    std::string decrease_pattern = "{z}/{x}/{y}.{ext}";
+    bool decrease_yes = false;
     bool decrease_verbose = false;
+    bool decrease_grayscale = false;
 
-    decrease_cmd->add_option("input", decrease_input, "Input directory arranged as z/x/y image tiles")
+    decrease_cmd->add_option("mbtiles", decrease_input, "Path to the MBTiles file")
         ->required()
-        ->check(CLI::ExistingDirectory);
-    decrease_cmd->add_option("output", decrease_output, "Directory to store the down-sampled tiles")
+        ->check(CLI::ExistingFile);
+    decrease_cmd->add_option("output", decrease_output, "Directory or .mbtiles file for the results")
         ->required();
-    decrease_cmd->add_flag("--grayscale", decrease_grayscale, "Convert the output tiles to grayscale");
-    decrease_cmd->add_flag("--force-png", decrease_force_png, "Force PNG output irrespective of source format");
+    CLI::Option *pattern_option = decrease_cmd
+                                       ->add_option("-p,--pattern", decrease_pattern,
+                                                    "Output filename pattern when writing to a directory. Uses placeholders like {z}, {x}, {y}, {ext}.")
+                                       ->default_val("{z}/{x}/{y}.{ext}");
+    decrease_cmd->add_option("--levels", decrease_levels,
+                             "Zoom levels to include. Negative values are relative to the maximum zoom (e.g. -1 -> max-1).")
+        ->expected(-1);
+    decrease_cmd->add_flag("-y,--yes", decrease_yes, "Overwrite the output if it exists without prompting");
     decrease_cmd->add_flag("-v,--verbose", decrease_verbose, "Print progress information");
+    decrease_cmd->add_flag("--grayscale", decrease_grayscale,
+                           "Convert copied and generated tiles to grayscale before writing");
 
     auto metadata_cmd = app.add_subcommand("metadata", "Inspect and update MBTiles metadata");
     metadata_cmd->require_subcommand(1);
@@ -129,10 +142,102 @@ int main(int argc, char **argv) {
         }
 
         if (*decrease_cmd) {
+            namespace fs = std::filesystem;
+
+            const auto existing_levels = mbtiles::list_zoom_levels(decrease_input);
+            if (existing_levels.empty()) {
+                std::cerr << "No tiles found in the source archive." << std::endl;
+                return EXIT_FAILURE;
+            }
+
+            const int max_zoom = *std::max_element(existing_levels.begin(), existing_levels.end());
+
+            std::vector<int> target_levels;
+            std::vector<int> generated_levels;
+            std::unordered_set<int> seen_levels;
+
+            if (decrease_levels.empty()) {
+                if (max_zoom <= 0) {
+                    std::cerr << "Cannot decrease zoom level because the maximum zoom is " << max_zoom << std::endl;
+                    return EXIT_FAILURE;
+                }
+                target_levels.push_back(max_zoom - 1);
+                generated_levels.push_back(max_zoom - 1);
+            } else {
+                for (int raw_level : decrease_levels) {
+                    int resolved_level = raw_level;
+                    if (raw_level < 0) {
+                        resolved_level = max_zoom + raw_level;
+                        if (resolved_level < 0) {
+                            std::cerr << "Requested level " << raw_level
+                                      << " is below zero after applying the relative offset." << std::endl;
+                            return EXIT_FAILURE;
+                        }
+                        generated_levels.push_back(resolved_level);
+                    }
+
+                    if (seen_levels.insert(resolved_level).second) {
+                        target_levels.push_back(resolved_level);
+                    }
+                }
+            }
+
+            for (int level : target_levels) {
+                if (level > max_zoom &&
+                    std::find(generated_levels.begin(), generated_levels.end(), level) == generated_levels.end()) {
+                    std::cerr << "Warning: requested zoom level " << level
+                              << " is above the source maximum " << max_zoom << std::endl;
+                }
+            }
+
+            fs::path output_path = decrease_output;
+            const bool output_exists = fs::exists(output_path);
+            bool output_is_directory = false;
+            if (output_exists) {
+                output_is_directory = fs::is_directory(output_path);
+            } else {
+                output_is_directory = !output_path.has_extension();
+            }
+
+            if (output_exists && !decrease_yes) {
+                std::cout << "Output path '" << output_path.string() << "' exists. Overwrite? [y/N] ";
+                std::string response;
+                if (!std::getline(std::cin, response)) {
+                    std::cerr << "Aborted." << std::endl;
+                    return EXIT_FAILURE;
+                }
+                const bool accepted = !response.empty() && (response[0] == 'y' || response[0] == 'Y');
+                if (!accepted) {
+                    std::cerr << "Aborted." << std::endl;
+                    return EXIT_FAILURE;
+                }
+                if (!output_is_directory && fs::is_regular_file(output_path)) {
+                    std::error_code remove_ec;
+                    fs::remove(output_path, remove_ec);
+                    if (remove_ec) {
+                        std::cerr << "Failed to remove existing file: " << remove_ec.message() << std::endl;
+                        return EXIT_FAILURE;
+                    }
+                }
+            }
+
+            if (!output_is_directory) {
+                if (!output_path.has_extension() || output_path.extension() != ".mbtiles") {
+                    std::cerr << "Output path must be a directory or end with .mbtiles" << std::endl;
+                    return EXIT_FAILURE;
+                }
+                if (pattern_option != nullptr && pattern_option->count() > 0) {
+                    std::cerr << "Warning: the output pattern is ignored when writing to an MBTiles file." << std::endl;
+                }
+            }
+
             mbtiles::DecreaseZoomOptions options;
-            options.grayscale = decrease_grayscale;
-            options.force_png = decrease_force_png;
+            options.target_levels = target_levels;
+            options.generated_levels = generated_levels;
+            options.pattern = decrease_pattern;
             options.verbose = decrease_verbose;
+            options.grayscale = decrease_grayscale;
+
             mbtiles::decrease_zoom_level(decrease_input, decrease_output, options);
             return EXIT_SUCCESS;
         }
