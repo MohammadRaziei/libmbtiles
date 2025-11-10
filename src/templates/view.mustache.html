@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>MBTiles Viewer</title>
+  <title>{{title}}</title>
   <link rel="stylesheet" href="/assets/leaflet.css">
   <script src="/assets/leaflet.js"></script>
 </head>
@@ -10,9 +10,10 @@
   <div id="map" style="width:100vw; height:100vh;"></div>
 
   <script>
-    const map = L.map('map').setView([0, 0], 2);
-    L.tileLayer('/tiles/{z}/{x}/{y}.png', {
-      maxZoom: 18,
+    const map = L.map('map').setView([{{center_lat}}, {{center_lng}}], {{initial_zoom}});
+    L.tileLayer('{{tile_path}}/{z}/{x}/{y}.png', {
+      minZoom: {{min_zoom}},
+      maxZoom: {{max_zoom}},
       tileSize: 256,
       attribution: '&copy; MBTiles Viewer'
     }).addTo(map);
