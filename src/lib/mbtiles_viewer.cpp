@@ -5,6 +5,8 @@
 
 
 #include "templates/view_mustache_html.h"
+#include "templates/assets/leaflet_css.h"
+#include "templates/assets/leaflet_js.h"
 
 #include <cmath>
 #include <filesystem>
@@ -190,12 +192,20 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
     // const std::string viewer_page = build_viewer_page(file_name);
 
 
-    const std::string viewer_page = templates::view_mustache_html;
+    const std::string viewer_page = templates::view_mustache_html; // use mustache for 
 
     httplib::Server server;
 
     server.Get("/view", [viewer_page](const httplib::Request &, httplib::Response &res) {
         res.set_content(viewer_page, "text/html; charset=utf-8");
+    });
+
+    server.Get("/assets/leaflet.js", [viewer_page](const httplib::Request &, httplib::Response &res) {
+        res.set_content(templates::assets::leaflet_js, "text/html; charset=utf-8");
+    });
+
+    server.Get("/assets/leaflet.css", [viewer_page](const httplib::Request &, httplib::Response &res) {
+        res.set_content(templates::assets::leaflet_css, "text/html; charset=utf-8");
     });
 
     // server.Get("/view/metadata", [metadata_json](const httplib::Request &, httplib::Response &res) {
