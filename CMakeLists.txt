@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(cmake/EmbededTemplate.cmake)
+
 add_library(mbtiles STATIC
     src/lib/mbtiles.cpp
     src/lib/mbtiles_viewer.cpp
