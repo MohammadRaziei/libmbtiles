@@ -12,7 +12,7 @@ function(make_include_guard INPUT OUT_VAR)
     get_filename_component(_BASE "${INPUT}" NAME)
     string(REPLACE "." "_" GUARD "${_BASE}")
     string(REPLACE "-" "_" GUARD "${GUARD}")
-    string(TOUPPER "LIBGSP_TEMPLATE_${GUARD}_H" GUARD)
+    string(TOUPPER "LIBMBTILES_TEMPLATE_${GUARD}_H" GUARD)
     set(${OUT_VAR} "${GUARD}" PARENT_SCOPE)
 endfunction()
 
@@ -77,32 +77,3 @@ foreach(TPL IN LISTS TEMPLATE_FILES)
     embed_file("${TPL}" "${OUT_HDR}" "${NAMESPACE}")
     list(APPEND GENERATED_TEMPLATE_HEADERS "${OUT_HDR}")
 endforeach()
-
-# ---- Main (project files) ----
-# set(GENERATED_PROJECT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/project")
-
-# # Track changes to project files to trigger reconfigure
-# set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-#         "${PROJECT_SOURCE_DIR}/.gitmodules"
-#         "${PROJECT_SOURCE_DIR}/pyproject.toml"
-# )
-
-# # Collect project files if they exist
-# set(PROJECT_FILES)
-# if(EXISTS "${PROJECT_SOURCE_DIR}/.gitmodules")
-#     list(APPEND PROJECT_FILES "${PROJECT_SOURCE_DIR}/.gitmodules")
-# elseif(EXISTS "${PROJECT_SOURCE_DIR}/.gitmodule")
-#     list(APPEND PROJECT_FILES "${PROJECT_SOURCE_DIR}/.gitmodule")
-# endif()
-
-# if(EXISTS "${PROJECT_SOURCE_DIR}/pyproject.toml")
-#     list(APPEND PROJECT_FILES "${PROJECT_SOURCE_DIR}/pyproject.toml")
-# endif()
-
-# # Generate headers into generated/project
-# foreach(PF IN LISTS PROJECT_FILES)
-#     make_identifier_from_filename("${PF}" VAR_NAME)
-#     set(OUT_HDR "${GENERATED_PROJECT_DIR}/${VAR_NAME}.h")
-#     embed_file("${PF}" "${OUT_HDR}" "project")
-#     list(APPEND GENERATED_TEMPLATE_HEADERS "${OUT_HDR}")
-# endforeach()
