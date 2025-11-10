@@ -27,6 +27,7 @@ add_executable(mbtiles-cli src/cli/main.cpp)
 
 target_include_directories(mbtiles-cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/includes
+    ${CMAKE_BINARY_DIR}/generated
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
 )
 
