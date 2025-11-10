@@ -54,7 +54,7 @@ void write_metadata_entry(const std::string &mbtiles_path, const std::string &ke
 std::vector<std::string> metadata_keys(const std::string &mbtiles_path);
 
 struct ViewerOptions {
-    std::string host = "127.0.0.1";
+    std::string host = "0.0.0.0";
     std::uint16_t port = 8080;
 };
 

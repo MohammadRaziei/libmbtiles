@@ -16,6 +16,7 @@ add_library(mbtiles STATIC
 target_include_directories(mbtiles
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/includes
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
 )
 
@@ -26,8 +27,6 @@ endif()
 add_executable(mbtiles-cli src/cli/main.cpp)
 
 target_include_directories(mbtiles-cli PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/includes
-    ${CMAKE_BINARY_DIR}/generated
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
 )
 
