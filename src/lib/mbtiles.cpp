@@ -698,8 +698,55 @@ std::vector<int> list_zoom_levels(const std::string &mbtiles_path) {
     return collect_zoom_levels(db.get());
 }
 
-void decrease_zoom_level(const std::string &input_mbtiles, const std::string &output_path,
-                         const DecreaseZoomOptions &options) {
+TileMap upsample_level(const TileMap &source_tiles, int source_zoom) {
+    TileMap result;
+    for (const auto &entry : source_tiles) {
+        const int parent_x = tile_key_x(entry.first);
+        const int parent_y = tile_key_y(entry.first);
+        const image_data &image = entry.second;
+
+        if (image.width <= 0 || image.height <= 0 || image.pixels.empty()) {
+            continue;
+        }
+
+        const int child_width = image.width;
+        const int child_height = image.height;
+        const int expanded_width = child_width * 2;
+        const int expanded_height = child_height * 2;
+
+        std::vector<unsigned char> expanded(static_cast<std::size_t>(expanded_width) * expanded_height * 4, 0);
+        if (!stbir_resize_uint8_linear(image.pixels.data(), child_width, child_height, child_width * 4, expanded.data(),
+                                       expanded_width, expanded_height, expanded_width * 4, STBIR_RGBA)) {
+            throw mbtiles_error("Failed to upsample tiles at zoom " + std::to_string(source_zoom));
+        }
+
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                image_data child;
+                child.width = child_width;
+                child.height = child_height;
+                child.pixels.resize(static_cast<std::size_t>(child_width) * child_height * 4, 0);
+
+                for (int row = 0; row < child_height; ++row) {
+                    const unsigned char *src =
+                        expanded.data() + ((dy * child_height + row) * expanded_width + dx * child_width) * 4;
+                    unsigned char *dest =
+                        child.pixels.data() + static_cast<std::size_t>(row) * child_width * 4;
+                    std::memcpy(dest, src, static_cast<std::size_t>(child_width) * 4);
+                }
+
+                const int child_x = parent_x * 2 + dx;
+                const int child_y = parent_y * 2 + dy;
+                result.emplace(make_tile_key(child_x, child_y), std::move(child));
+            }
+        }
+    }
+
+    return result;
+}
+
+void resize_zoom_levels(const std::string &input_mbtiles, const std::string &output_path,
+                        const ResizeOptions &options) {
     auto db = open_database(input_mbtiles);
     const std::vector<int> available_levels = collect_zoom_levels(db.get());
     if (available_levels.empty()) {
@@ -707,15 +754,15 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
     }
 
     std::vector<int> requested_levels = options.target_levels;
-    std::unordered_set<int> generate_set(options.generated_levels.begin(), options.generated_levels.end());
+    const int min_zoom_available = *std::min_element(available_levels.begin(), available_levels.end());
+    const int max_zoom_available = *std::max_element(available_levels.begin(), available_levels.end());
 
-    const int max_zoom = *std::max_element(available_levels.begin(), available_levels.end());
     if (requested_levels.empty()) {
-        if (max_zoom <= 0) {
-            throw mbtiles_error("Cannot decrease zoom level because maximum zoom is " + std::to_string(max_zoom));
+        if (min_zoom_available <= 0) {
+            throw mbtiles_error("Cannot generate a lower zoom level because minimum zoom is " +
+                                std::to_string(min_zoom_available));
         }
-        requested_levels.push_back(max_zoom - 1);
-        generate_set.insert(max_zoom - 1);
+        requested_levels.push_back(min_zoom_available - 1);
     }
 
     std::vector<int> unique_levels;
@@ -732,6 +779,19 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
 
     std::unordered_set<int> available_set(available_levels.begin(), available_levels.end());
 
+    std::vector<int> copy_levels;
+    std::vector<int> generated_levels;
+    for (int level : requested_levels) {
+        if (available_set.count(level) > 0) {
+            copy_levels.push_back(level);
+        } else {
+            generated_levels.push_back(level);
+        }
+    }
+
+    std::sort(copy_levels.begin(), copy_levels.end());
+    std::sort(generated_levels.begin(), generated_levels.end());
+
     fs::path destination_path = output_path;
     bool output_is_directory = false;
     if (fs::exists(destination_path)) {
@@ -745,7 +805,7 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
     } else {
         if (destination_path.has_extension()) {
             if (!equals_ignore_case(destination_path.extension().string(), ".mbtiles")) {
-                throw mbtiles_error("Only directories or .mbtiles files are supported as decrease-zoom outputs");
+                throw mbtiles_error("Only directories or .mbtiles files are supported as resize outputs");
             }
         } else {
             output_is_directory = true;
@@ -769,37 +829,7 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
 
     const std::string metadata_extension = read_metadata_format_extension(db.get());
 
-    std::vector<int> copy_levels;
-    for (int level : requested_levels) {
-        if (generate_set.count(level) > 0) {
-            continue;
-        }
-        if (available_set.count(level) > 0) {
-            copy_levels.push_back(level);
-        } else {
-            std::cerr << "Warning: zoom level " << level << " is not present in the source archive and will be skipped"
-                      << std::endl;
-        }
-    }
-
-    std::vector<int> generate_levels(generate_set.begin(), generate_set.end());
-    std::sort(generate_levels.begin(), generate_levels.end(), std::greater<int>());
-
     std::unordered_map<int, TileMap> tile_cache;
-
-    auto ensure_level_tiles = [&](int level) -> TileMap & {
-        auto it = tile_cache.find(level);
-        if (it != tile_cache.end()) {
-            return it->second;
-        }
-        if (!available_set.count(level)) {
-            throw mbtiles_error("Zoom level " + std::to_string(level) +
-                                " is required for downsampling but is not available");
-        }
-        TileMap tiles = load_level_rgba(db.get(), level);
-        auto inserted = tile_cache.emplace(level, std::move(tiles));
-        return inserted.first->second;
-    };
 
     auto apply_grayscale_to_tiles = [&](TileMap &tiles) {
         if (!options.grayscale) {
@@ -810,17 +840,54 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
         }
     };
 
-    for (int level : generate_levels) {
-        const int source_level = level + 1;
-        TileMap &source_tiles = ensure_level_tiles(source_level);
-        TileMap generated = downsample_level(source_tiles, source_level);
+    auto ensure_level_tiles = [&](auto &&self, int level) -> TileMap & {
+        auto cache_it = tile_cache.find(level);
+        if (cache_it != tile_cache.end()) {
+            return cache_it->second;
+        }
+
+        if (available_set.count(level) > 0) {
+            TileMap tiles = load_level_rgba(db.get(), level);
+            auto inserted = tile_cache.emplace(level, std::move(tiles));
+            return inserted.first->second;
+        }
+
+        TileMap generated;
+        if (level < min_zoom_available) {
+            TileMap &parent_tiles = self(self, level + 1);
+            generated = downsample_level(parent_tiles, level + 1);
+        } else if (level > max_zoom_available) {
+            TileMap &source_tiles = self(self, level - 1);
+            generated = upsample_level(source_tiles, level - 1);
+        } else {
+            bool created = false;
+            if (level + 1 <= max_zoom_available || available_set.count(level + 1) > 0 ||
+                tile_cache.count(level + 1) > 0) {
+                TileMap &parent_tiles = self(self, level + 1);
+                generated = downsample_level(parent_tiles, level + 1);
+                created = true;
+            }
+            if (!created) {
+                if (level == 0) {
+                    throw mbtiles_error("Unable to generate zoom level " + std::to_string(level));
+                }
+                TileMap &source_tiles = self(self, level - 1);
+                generated = upsample_level(source_tiles, level - 1);
+            }
+        }
+
         apply_grayscale_to_tiles(generated);
-        tile_cache[level] = std::move(generated);
+        auto inserted = tile_cache.emplace(level, std::move(generated));
+        return inserted.first->second;
+    };
+
+    for (int level : generated_levels) {
+        ensure_level_tiles(ensure_level_tiles, level);
     }
 
-    if (!generate_levels.empty() && options.verbose) {
+    if (!generated_levels.empty() && options.verbose) {
         std::cout << "Generated zoom levels:";
-        for (int level : generate_levels) {
+        for (int level : generated_levels) {
             std::cout << ' ' << level;
         }
         std::cout << std::endl;
@@ -910,12 +977,8 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
             }
         }
 
-        for (int level : generate_levels) {
-            auto cache_it = tile_cache.find(level);
-            if (cache_it == tile_cache.end()) {
-                continue;
-            }
-            const TileMap &tiles = cache_it->second;
+        for (int level : generated_levels) {
+            auto &tiles = ensure_level_tiles(ensure_level_tiles, level);
             for (const auto &entry : tiles) {
                 const int x = tile_key_x(entry.first);
                 const int y = tile_key_y(entry.first);
@@ -1020,12 +1083,8 @@ void decrease_zoom_level(const std::string &input_mbtiles, const std::string &ou
         }
     }
 
-    for (int level : generate_levels) {
-        auto cache_it = tile_cache.find(level);
-        if (cache_it == tile_cache.end()) {
-            continue;
-        }
-        const TileMap &tiles = cache_it->second;
+    for (int level : generated_levels) {
+        auto &tiles = ensure_level_tiles(ensure_level_tiles, level);
         for (const auto &entry : tiles) {
             const int x = tile_key_x(entry.first);
             const int y = tile_key_y(entry.first);

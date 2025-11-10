@@ -25,9 +25,8 @@ struct GrayscaleOptions {
     bool verbose = false;
 };
 
-struct DecreaseZoomOptions {
+struct ResizeOptions {
     std::vector<int> target_levels;
-    std::vector<int> generated_levels;
     std::string pattern = "{z}/{x}/{y}.{ext}";
     bool verbose = false;
     bool grayscale = false;
@@ -40,8 +39,8 @@ void convert_directory_to_grayscale(const std::string &input_directory, const st
 
 std::vector<int> list_zoom_levels(const std::string &mbtiles_path);
 
-void decrease_zoom_level(const std::string &input_mbtiles, const std::string &output_path,
-                         const DecreaseZoomOptions &options = {});
+void resize_zoom_levels(const std::string &input_mbtiles, const std::string &output_path,
+                        const ResizeOptions &options = {});
 
 std::map<std::string, std::string> read_metadata(const std::string &mbtiles_path);
 
