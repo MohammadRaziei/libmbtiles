@@ -23,20 +23,28 @@ struct GrayscaleOptions {
     bool recursive = true;
 };
 
-struct ResizeOptions {
-    std::vector<int> target_levels;
-    std::string pattern = "{z}/{x}/{y}.{ext}";
-    bool grayscale = false;
+enum class Format {
+    DEFAULT,
+    JPG,
+    PNG,
 };
 
+struct ConvertOptions {
+    std::vector<int> target_levels = {0};
+    std::string output_mbtiles = "";
+    ExtractOptions extract_options = {}; // only if output_mbtiles is empty  
+    bool grayscale = false;
+    Format format = Format::DEFAULT;
+};
+
+
 enum class LogLevel {
-    trace,
-    debug,
-    info,
-    notice,
-    warning,
-    error,
-    fatal
+    Trace,
+    DEBUG,
+    INFO,
+    WARNING,
+    ERROR,
+    FATAL
 };
 
 class Logger {
