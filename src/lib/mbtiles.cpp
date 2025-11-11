@@ -1,5 +1,6 @@
 #include "mbtiles.h"
 
+#include "aixlog.hpp"
 #include "sqlite3.h"
 
 #include <algorithm>
@@ -10,7 +11,6 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -31,6 +31,63 @@
 #include "stb_image_resize2.h"
 
 namespace mbtiles {
+
+namespace {
+AixLog::Severity to_aixlog_severity(LogLevel level) {
+    switch (level) {
+        case LogLevel::trace:
+            return AixLog::Severity::trace;
+        case LogLevel::debug:
+            return AixLog::Severity::debug;
+        case LogLevel::info:
+            return AixLog::Severity::info;
+        case LogLevel::notice:
+            return AixLog::Severity::notice;
+        case LogLevel::warning:
+            return AixLog::Severity::warning;
+        case LogLevel::error:
+            return AixLog::Severity::error;
+        case LogLevel::fatal:
+            return AixLog::Severity::fatal;
+    }
+    return AixLog::Severity::warning;
+}
+}  // namespace
+
+struct Logger::Impl {
+    LogLevel level = LogLevel::warning;
+
+    void apply() {
+        AixLog::Filter filter;
+        filter.add_filter(to_aixlog_severity(level));
+        auto sink = std::make_shared<AixLog::SinkCout>(filter, "[#severity] #message");
+        AixLog::Log::init({sink});
+    }
+};
+
+Logger::Impl &Logger::impl() {
+    static Logger::Impl instance;
+    static bool initialized = false;
+    if (!initialized) {
+        instance.apply();
+        initialized = true;
+    }
+    return instance;
+}
+
+void Logger::set_level(LogLevel level) {
+    auto &state = impl();
+    if (state.level == level) {
+        return;
+    }
+    state.level = level;
+    state.apply();
+}
+
+LogLevel Logger::level() {
+    return impl().level;
+}
+
 namespace {
 namespace fs = std::filesystem;
 
@@ -624,14 +681,12 @@ std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &optio
         }
 
         ++count;
-        if (options.verbose && count % 100 == 0) {
-            std::cout << "Extracted " << count << " tiles..." << std::endl;
+        if (count % 100 == 0) {
+            LOG(INFO) << "Extracted " << count << " tiles...";
         }
     }
 
-    if (options.verbose) {
-        std::cout << "Extraction completed. Total tiles: " << count << std::endl;
-    }
+    LOG(INFO) << "Extraction completed. Total tiles: " << count;
 
     return count;
 }
@@ -677,9 +732,7 @@ void convert_directory_to_grayscale(const std::string &input_directory, const st
         convert_pixels_to_grayscale(image.pixels);
         save_image_rgba(destination, image.pixels.data(), image.width, image.height);
 
-        if (options.verbose) {
-            std::cout << "Converted " << entry.path() << " -> " << destination << std::endl;
-        }
+        LOG(INFO) << "Converted " << entry.path() << " -> " << destination;
     };
 
     if (options.recursive) {
@@ -885,12 +938,13 @@ void resize_zoom_levels(const std::string &input_mbtiles, const std::string &out
         ensure_level_tiles(ensure_level_tiles, level);
     }
 
-    if (!generated_levels.empty() && options.verbose) {
-        std::cout << "Generated zoom levels:";
+    if (!generated_levels.empty()) {
+        std::ostringstream message;
+        message << "Generated zoom levels:";
         for (int level : generated_levels) {
-            std::cout << ' ' << level;
+            message << ' ' << level;
         }
-        std::cout << std::endl;
+        LOG(INFO) << message.str();
     }
 
     if (output_is_directory) {

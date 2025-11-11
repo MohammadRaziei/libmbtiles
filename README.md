@@ -68,7 +68,7 @@ Usage: mbtiles-cli [OPTIONS] SUBCOMMAND
 Extracts all tiles from an MBTiles SQLite database to a directory on disk.
 
 ```
-mbtiles-cli extract <mbtiles> [--output-dir <dir>] [--pattern <pattern>] [--verbose]
+mbtiles-cli extract <mbtiles> [--output-dir <dir>] [--pattern <pattern>] [-v] [--verbose-extra]
 ```
 
 | Option | Description |
@@ -76,7 +76,8 @@ mbtiles-cli extract <mbtiles> [--output-dir <dir>] [--pattern <pattern>] [--verb
 | `mbtiles` | Required path to the MBTiles file. Must exist. |
 | `-o`, `--output-dir` | Destination directory. Defaults to the current directory. |
 | `-p`, `--pattern` | Filename pattern for each tile. Defaults to `{z}/{x}/{y}.jpg`. |
-| `-v`, `--verbose` | Print progress information every 100 tiles. |
+| `-v`, `--verbose` | Increase logging verbosity to include progress updates. Repeat (`-vv`) for debug-level output. |
+| `--verbose-extra` | Shortcut for enabling debug-level logging. |
 
 Patterns may reference placeholders to build informative paths:
 
@@ -100,14 +101,15 @@ Converts a directory tree of raster tiles to grayscale and writes the result to
 a separate directory while preserving the directory structure.
 
 ```
-mbtiles-cli convert-gray <input> <output> [--no-recursive] [--verbose]
+mbtiles-cli convert-gray <input> <output> [--no-recursive] [-v] [--verbose-extra]
 ```
 
 - `input` – Source directory containing tile images (`.png`, `.jpg`, `.jpeg`).
 - `output` – Target directory for grayscale tiles. Created if missing.
 - `--no-recursive` – Only process files in the top-level directory. By default,
   subdirectories are traversed recursively.
-- `-v`, `--verbose` – Print each converted file pair.
+- `-v`, `--verbose` – Enable info-level logging (prints each converted file). Use twice (`-vv`) for debug.
+- `--verbose-extra` – Enable debug-level logging directly.
 
 ### `resize`
 
@@ -116,7 +118,7 @@ archive. The command can write the resulting tiles to a directory (using a
 filename pattern) or directly into a new MBTiles file.
 
 ```
-mbtiles-cli resize <mbtiles> <output> [--levels ...] [-p <pattern>] [-y] [-v] [--grayscale]
+mbtiles-cli resize <mbtiles> <output> [--levels ...] [-p <pattern>] [-y] [-v] [--verbose-extra] [--grayscale]
 ```
 
 - `<mbtiles>` – Source MBTiles file. Must exist.
@@ -130,7 +132,8 @@ mbtiles-cli resize <mbtiles> <output> [--levels ...] [-p <pattern>] [-y] [-v] [-
   default is `{z}/{x}/{y}.{ext}` and it supports placeholders like `{z}`,
   `{x}`, `{y}`, and `{ext}`.
 - `-y`, `--yes` – Overwrite existing outputs without prompting.
-- `-v`, `--verbose` – Print progress details.
+- `-v`, `--verbose` – Enable info-level logging for progress updates. Repeat (`-vv`) for debug-level output.
+- `--verbose-extra` – Shortcut flag to enable debug-level logging.
 - `--grayscale` – Convert copied and generated tiles to grayscale. Directory
   outputs fall back to `.png` files if the pattern does not specify an image
   extension.
@@ -203,7 +206,6 @@ std::size_t extract(const std::string &mbtiles_path,
   directory).
 - `pattern` – Output filename pattern (default: `{z}/{x}/{y}.jpg`). Supports the
   placeholders listed earlier in the CLI section.
-- `verbose` – Print progress every 100 tiles to `std::cout`.
 
 The function returns the number of tiles written. The MBTiles archive must use
 the standard schema (`tiles` and `metadata` tables).
@@ -220,7 +222,6 @@ void convert_directory_to_grayscale(const std::string &input_directory,
 
 - `recursive` – Traverse subdirectories when `true` (default). Only the top
   level is processed when `false`.
-- `verbose` – Emit a log line for each converted file.
 
 The helper loads PNG or JPEG tiles into memory, converts pixels using the
 standard luminance formula (`0.299 * R  0.587 * G  0.114 * B`), and writes the
@@ -242,8 +243,19 @@ void resize_zoom_levels(const std::string &input_mbtiles,
   source archive.
 - `pattern` – Filename pattern used when extracting tiles to a directory. This
   is ignored when the output is another MBTiles file.
-- `verbose` – Print progress information while generating levels.
 - `grayscale` – Convert tiles to grayscale before writing.
+
+### Logging
+
+Library logging is controlled globally via `mbtiles::Logger`:
+
+```cpp
+mbtiles::Logger::set_level(mbtiles::LogLevel::info);
+```
+
+The default level is `warning`. Raising the level to `info` enables high-level
+progress messages, while `debug` emits the most verbose details. CLI flags such
+as `-v`, `-vv`, and `--verbose-extra` adjust the same logger under the hood.
 
 The routine inspects the source archive to determine available zoom levels,
 loads tiles on demand, and produces new zoom levels by either merging four

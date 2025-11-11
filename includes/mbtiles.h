@@ -17,19 +17,36 @@ public:
 struct ExtractOptions {
     std::string output_directory = ".";
     std::string pattern = "{z}/{x}/{y}.{ext}";
-    bool verbose = false;
 };
 
 struct GrayscaleOptions {
     bool recursive = true;
-    bool verbose = false;
 };
 
 struct ResizeOptions {
     std::vector<int> target_levels;
     std::string pattern = "{z}/{x}/{y}.{ext}";
-    bool verbose = false;
     bool grayscale = false;
+};
+
+enum class LogLevel {
+    trace,
+    debug,
+    info,
+    notice,
+    warning,
+    error,
+    fatal
+};
+
+class Logger {
+public:
+    static void set_level(LogLevel level);
+    static LogLevel level();
+
+private:
+    struct Impl;
+    static Impl &impl();
 };
 
 std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &options = {});

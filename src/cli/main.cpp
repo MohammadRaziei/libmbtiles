@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -15,12 +16,19 @@ int main(int argc, char **argv) {
     CLI::App app{"libmbtiles command line interface"};
     app.require_subcommand(1);
 
+    int verbosity = 0;
+    auto add_logging_flags = [&](CLI::App *cmd) {
+        cmd->add_flag("-v,--verbose", verbosity, "Increase logging verbosity");
+        cmd->add_flag_function("--verbose-extra", [&](int count) { verbosity += count * 2; },
+                               "Enable extra verbose logging");
+    };
+
     auto extract_cmd = app.add_subcommand("extract", "Extract tiles from an MBTiles archive");
+    add_logging_flags(extract_cmd);
 
     std::string extract_input;
     std::string extract_output = ".";
     std::string extract_pattern = "{z}/{x}/{y}.{ext}";
-    bool extract_verbose = false;
 
     extract_cmd->add_option("mbtiles", extract_input, "Path to the MBTiles file")
         ->required()
@@ -30,13 +38,12 @@ int main(int argc, char **argv) {
     extract_cmd->add_option("-p,--pattern", extract_pattern,
                              "Output filename pattern using placeholders like {z}, {x}, {y}, {t}, {n}, {XX}, {ext}.")
         ->default_val("{z}/{x}/{y}.{ext}");
-    extract_cmd->add_flag("-v,--verbose", extract_verbose, "Enable verbose logging during extraction");
 
     auto grayscale_cmd = app.add_subcommand("convert-gray", "Convert a directory of tiles to grayscale");
+    add_logging_flags(grayscale_cmd);
     std::string gray_input;
     std::string gray_output;
     bool gray_no_recursive = false;
-    bool gray_verbose = false;
 
     grayscale_cmd->add_option("input", gray_input, "Input directory containing image tiles")
         ->required()
@@ -44,16 +51,15 @@ int main(int argc, char **argv) {
     grayscale_cmd->add_option("output", gray_output, "Directory where grayscale tiles will be written")
         ->required();
     grayscale_cmd->add_flag("--no-recursive", gray_no_recursive, "Only process files in the top-level directory");
-    grayscale_cmd->add_flag("-v,--verbose", gray_verbose, "Print each converted file");
 
     auto resize_cmd = app.add_subcommand("resize",
                                          "Resize tiles to generate additional zoom levels or copy existing ones");
+    add_logging_flags(resize_cmd);
     std::string resize_input;
     std::string resize_output;
     std::vector<std::string> resize_levels_raw;
     std::string resize_pattern = "{z}/{x}/{y}.{ext}";
     bool resize_yes = false;
-    bool resize_verbose = false;
     bool resize_grayscale = false;
 
     resize_cmd->add_option("mbtiles", resize_input, "Path to the MBTiles file")
@@ -69,7 +75,6 @@ int main(int argc, char **argv) {
                            "Zoom levels to include. Prefix values with '-' to request levels below the minimum zoom and with '+' to request levels above the maximum zoom. Unprefixed values are treated as absolute zoom levels.")
         ->expected(-1);
     resize_cmd->add_flag("-y,--yes", resize_yes, "Overwrite the output if it exists without prompting");
-    resize_cmd->add_flag("-v,--verbose", resize_verbose, "Print progress information");
     resize_cmd->add_flag("--grayscale", resize_grayscale,
                          "Convert copied and generated tiles to grayscale before writing");
 
@@ -77,12 +82,14 @@ int main(int argc, char **argv) {
     metadata_cmd->require_subcommand(1);
 
     auto metadata_list_cmd = metadata_cmd->add_subcommand("list", "List all metadata key/value pairs");
+    add_logging_flags(metadata_list_cmd);
     std::string metadata_list_path;
     metadata_list_cmd->add_option("mbtiles", metadata_list_path, "Path to the MBTiles file")
         ->required()
         ->check(CLI::ExistingFile);
 
     auto metadata_get_cmd = metadata_cmd->add_subcommand("get", "Read a metadata value by key");
+    add_logging_flags(metadata_get_cmd);
     std::string metadata_get_path;
     std::string metadata_get_key;
     metadata_get_cmd->add_option("mbtiles", metadata_get_path, "Path to the MBTiles file")
@@ -92,6 +99,7 @@ int main(int argc, char **argv) {
         ->required();
 
     auto metadata_set_cmd = metadata_cmd->add_subcommand("set", "Write a metadata entry");
+    add_logging_flags(metadata_set_cmd);
     std::string metadata_set_path;
     std::string metadata_set_key;
     std::string metadata_set_value;
@@ -108,6 +116,7 @@ int main(int argc, char **argv) {
                                 "Fail if the key already exists instead of overwriting");
 
     auto viewer_cmd = app.add_subcommand("view", "Launch a local web viewer for an MBTiles archive");
+    add_logging_flags(viewer_cmd);
     std::string viewer_path;
     std::string viewer_host = "127.0.0.1";
     std::uint16_t viewer_port = 8080;
@@ -122,12 +131,19 @@ int main(int argc, char **argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    if (verbosity >= 2) {
+        mbtiles::Logger::set_level(mbtiles::LogLevel::debug);
+    } else if (verbosity == 1) {
+        mbtiles::Logger::set_level(mbtiles::LogLevel::info);
+    } else {
+        mbtiles::Logger::set_level(mbtiles::LogLevel::warning);
+    }
+
     try {
         if (*extract_cmd) {
             mbtiles::ExtractOptions options;
             options.output_directory = extract_output;
             options.pattern = extract_pattern;
-            options.verbose = extract_verbose;
 
             const auto count = mbtiles::extract(extract_input, options);
             std::cout << "Extracted " << count << " tiles to '" << options.output_directory << "'" << std::endl;
@@ -137,7 +153,6 @@ int main(int argc, char **argv) {
         if (*grayscale_cmd) {
             mbtiles::GrayscaleOptions options;
             options.recursive = !gray_no_recursive;
-            options.verbose = gray_verbose;
             mbtiles::convert_directory_to_grayscale(gray_input, gray_output, options);
             return EXIT_SUCCESS;
         }
@@ -266,7 +281,6 @@ int main(int argc, char **argv) {
             mbtiles::ResizeOptions options;
             options.target_levels = target_levels;
             options.pattern = resize_pattern;
-            options.verbose = resize_verbose;
             options.grayscale = resize_grayscale;
 
             mbtiles::resize_zoom_levels(resize_input, resize_output, options);
