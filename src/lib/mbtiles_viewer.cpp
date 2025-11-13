@@ -1,9 +1,11 @@
-#include "httplib.h"
 #include "mbtiles.h"
+
+#include "httplib.h"
 #include "sqlite3.h"
 #include "mustache.hpp"
 
 
+#include "templates/index_mustache_html.h"
 #include "templates/view_mustache_html.h"
 #include "templates/assets/leaflet_css.h"
 #include "templates/assets/leaflet_js.h"
@@ -28,27 +30,7 @@
 namespace mbtiles {
 namespace {
 
-struct sqlite_deleter {
-    void operator()(sqlite3 *db) const noexcept {
-        if (db != nullptr) {
-            sqlite3_close(db);
-        }
-    }
-};
 
-std::unique_ptr<sqlite3, sqlite_deleter> open_database(const std::string &path) {
-    sqlite3 *raw_db = nullptr;
-    if (sqlite3_open_v2(path.c_str(), &raw_db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-        std::string message = "Unable to open MBTiles file: " + path;
-        if (raw_db != nullptr) {
-            message += ": ";
-            message += sqlite3_errmsg(raw_db);
-            sqlite3_close(raw_db);
-        }
-        throw mbtiles_error(message);
-    }
-    return std::unique_ptr<sqlite3, sqlite_deleter>(raw_db);
-}
 
 std::string detect_content_type(const std::string &payload) {
     if (payload.size() >= 8) {
@@ -223,35 +205,30 @@ std::string format_double(double value) {
 
 }  // namespace
 
-void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options) {
-    if (mbtiles_path.empty()) {
-        throw std::invalid_argument("MBTiles path must not be empty");
-    }
-
-    auto db = open_database(mbtiles_path);
+void MBTiles::view(std::uint16_t port, std::string host) {
     std::mutex db_mutex;
 
-    const auto metadata = read_metadata(mbtiles_path);
+    const auto _metadata = metadata();
 
     std::optional<int> min_zoom_value;
-    if (const auto min_zoom_str = find_metadata_value(metadata, "minzoom")) {
+    if (const auto min_zoom_str = find_metadata_value(_metadata, "minzoom")) {
         min_zoom_value = parse_int(*min_zoom_str);
     }
     if (!min_zoom_value) {
         min_zoom_value = [&]() -> std::optional<int> {
             std::lock_guard<std::mutex> lock(db_mutex);
-            return query_zoom_value(db.get(), "SELECT MIN(zoom_level) FROM tiles");
+            return query_zoom_value(_db, "SELECT MIN(zoom_level) FROM tiles");
         }();
     }
 
     std::optional<int> max_zoom_value;
-    if (const auto max_zoom_str = find_metadata_value(metadata, "maxzoom")) {
+    if (const auto max_zoom_str = find_metadata_value(_metadata, "maxzoom")) {
         max_zoom_value = parse_int(*max_zoom_str);
     }
     if (!max_zoom_value) {
         max_zoom_value = [&]() -> std::optional<int> {
             std::lock_guard<std::mutex> lock(db_mutex);
-            return query_zoom_value(db.get(), "SELECT MAX(zoom_level) FROM tiles");
+            return query_zoom_value(_db, "SELECT MAX(zoom_level) FROM tiles");
         }();
     }
 
@@ -261,11 +238,9 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
         max_zoom = min_zoom;
     }
 
-    const std::filesystem::path file_path = std::filesystem::absolute(mbtiles_path);
-    const std::string file_name = file_path.filename().string();
 
     std::optional<CenterInfo> center_info;
-    if (const auto center_value = find_metadata_value(metadata, "center")) {
+    if (const auto center_value = find_metadata_value(_metadata, "center")) {
         center_info = parse_center(*center_value);
     }
 
@@ -274,7 +249,7 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
     if (center_info) {
         center_lat = center_info->lat;
         center_lon = center_info->lon;
-    } else if (const auto bounds_value = find_metadata_value(metadata, "bounds")) {
+    } else if (const auto bounds_value = find_metadata_value(_metadata, "bounds")) {
         if (const auto bounds = parse_bounds(*bounds_value)) {
             center_lat = (bounds->min_lat + bounds->max_lat) / 2.0;
             center_lon = (bounds->min_lon + bounds->max_lon) / 2.0;
@@ -288,7 +263,7 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
     initial_zoom = std::clamp(initial_zoom, min_zoom, max_zoom);
 
     kainjow::mustache::data context;
-    context.set("title", file_name);
+    context.set("title", _name);
     context.set("tile_path", std::string{"/tiles"});
     context.set("min_zoom", std::to_string(min_zoom));
     context.set("max_zoom", std::to_string(max_zoom));
@@ -297,12 +272,21 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
     context.set("center_lng", format_double(center_lon));
 
     kainjow::mustache::mustache view_template{templates::view_mustache_html};
-    const std::string viewer_page = view_template.render(context);
+    const std::string map_page = view_template.render(context);
+
+
+    kainjow::mustache::mustache index_template{templates::index_mustache_html};
+    const std::string index_page = index_template.render(context);
+
 
     httplib::Server server;
 
-    server.Get("/view", [viewer_page](const httplib::Request &, httplib::Response &res) {
-        res.set_content(viewer_page, "text/html; charset=utf-8");
+    server.Get("/", [index_page](const httplib::Request &, httplib::Response &res) {
+        res.set_content(index_page, "text/html; charset=utf-8");
+    });
+
+    server.Get("/map", [map_page](const httplib::Request &, httplib::Response &res) {
+        res.set_content(map_page, "text/html; charset=utf-8");
     });
 
     server.Get("/assets/leaflet.js", [](const httplib::Request &, httplib::Response &res) {
@@ -314,7 +298,7 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
     });
 
     server.Get(R"(/tiles/(\d+)/(\d+)/(\d+)\.png)",
-               [&db, &db_mutex](const httplib::Request &req, httplib::Response &res) {
+               [this, &db_mutex](const httplib::Request &req, httplib::Response &res) {
                    const int zoom = std::stoi(req.matches[1]);
                    const int column = std::stoi(req.matches[2]);
                    const int row = std::stoi(req.matches[3]);
@@ -338,7 +322,7 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
                        sqlite3_stmt *stmt = nullptr;
                        const char *sql =
                            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=? LIMIT 1";
-                       if (sqlite3_prepare_v2(db.get(), sql, -1, &stmt, nullptr) != SQLITE_OK) {
+                       if (sqlite3_prepare_v2(_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
                            res.status = 500;
                            res.set_content("Failed to prepare tile query", "text/plain; charset=utf-8");
                            return;
@@ -372,10 +356,10 @@ void serve_viewer(const std::string &mbtiles_path, const ViewerOptions &options)
                    res.set_content(tile_data, content_type.c_str());
                });
 
-    std::cout << "Serving MBTiles viewer for '" << file_name << "' on http://" << options.host << ':'
-              << options.port << "/view" << std::endl;
+    std::cout << "Serving MBTiles viewer for '" << _name << "' on http://" << host << ':'
+              << port << "/map" << std::endl;
 
-    if (!server.listen(options.host.c_str(), options.port)) {
+    if (!server.listen(host.c_str(), port)) {
         throw std::runtime_error("Failed to start HTTP server. Ensure the port is available.");
     }
 }

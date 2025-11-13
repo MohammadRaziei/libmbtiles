@@ -125,170 +125,167 @@ int main(int argc, char **argv) {
         ->required()
         ->check(CLI::ExistingFile);
     viewer_cmd->add_option("--host", viewer_host, "Host/IP address to bind the viewer server")
-        ->default_val("127.0.0.1");
+        ->default_val("0.0.0.0");
     viewer_cmd->add_option("-p,--port", viewer_port, "Port to bind the viewer server")
         ->default_val(8080);
 
     CLI11_PARSE(app, argc, argv);
 
     if (verbosity >= 2) {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::debug);
+        mbtiles::Logger::set_level(mbtiles::LogLevel::DEBUG);
     } else if (verbosity == 1) {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::info);
+        mbtiles::Logger::set_level(mbtiles::LogLevel::INFO);
     } else {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::warning);
+        mbtiles::Logger::set_level(mbtiles::LogLevel::WARNING);
     }
 
     try {
         if (*extract_cmd) {
-            mbtiles::ExtractOptions options;
-            options.output_directory = extract_output;
-            options.pattern = extract_pattern;
-
-            const auto count = mbtiles::extract(extract_input, options);
-            std::cout << "Extracted " << count << " tiles to '" << options.output_directory << "'" << std::endl;
+            mbtiles::MBTiles mb(extract_input);
+            const auto count = mb.extract(extract_output, extract_pattern);
+            std::cout << "Extracted " << count << " tiles to '" << extract_output << "'" << std::endl;
             return EXIT_SUCCESS;
         }
 
         if (*grayscale_cmd) {
             mbtiles::GrayscaleOptions options;
             options.recursive = !gray_no_recursive;
-            mbtiles::convert_directory_to_grayscale(gray_input, gray_output, options);
+            // mbtiles::convert_directory_to_grayscale(gray_input, gray_output, options);
             return EXIT_SUCCESS;
         }
 
         if (*resize_cmd) {
-            namespace fs = std::filesystem;
+            // namespace fs = std::filesystem;
 
-            const auto existing_levels = mbtiles::list_zoom_levels(resize_input);
-            if (existing_levels.empty()) {
-                std::cerr << "No tiles found in the source archive." << std::endl;
-                return EXIT_FAILURE;
-            }
+            // const auto existing_levels = mbtiles::list_zoom_levels(resize_input);
+            // if (existing_levels.empty()) {
+            //     std::cerr << "No tiles found in the source archive." << std::endl;
+            //     return EXIT_FAILURE;
+            // }
 
-            const int min_zoom = *std::min_element(existing_levels.begin(), existing_levels.end());
-            const int max_zoom = *std::max_element(existing_levels.begin(), existing_levels.end());
+            // const int min_zoom = *std::min_element(existing_levels.begin(), existing_levels.end());
+            // const int max_zoom = *std::max_element(existing_levels.begin(), existing_levels.end());
 
-            std::vector<int> target_levels;
-            std::unordered_set<int> seen_levels;
+            // std::vector<int> target_levels;
+            // std::unordered_set<int> seen_levels;
 
-            auto add_level = [&](int level) {
-                if (level < 0) {
-                    std::cerr << "Requested zoom level " << level << " is below zero." << std::endl;
-                    throw std::runtime_error("invalid zoom");
-                }
-                if (seen_levels.insert(level).second) {
-                    target_levels.push_back(level);
-                }
-            };
+            // auto add_level = [&](int level) {
+            //     if (level < 0) {
+            //         std::cerr << "Requested zoom level " << level << " is below zero." << std::endl;
+            //         throw std::runtime_error("invalid zoom");
+            //     }
+            //     if (seen_levels.insert(level).second) {
+            //         target_levels.push_back(level);
+            //     }
+            // };
 
-            try {
-                if (resize_levels_raw.empty()) {
-                    if (min_zoom <= 0) {
-                        std::cerr << "Cannot generate a lower zoom level because the minimum zoom is " << min_zoom
-                                  << " and zoom levels cannot be negative." << std::endl;
-                        return EXIT_FAILURE;
-                    }
-                    add_level(min_zoom - 1);
-                }
-                for (const auto &token : resize_levels_raw) {
-                    if (token.empty()) {
-                        continue;
-                    }
-                    if (token.front() == '+') {
-                        if (token.size() == 1) {
-                            throw std::invalid_argument("+");
-                        }
-                        const int offset = std::stoi(token.substr(1));
-                        const int resolved = max_zoom + offset;
-                        add_level(resolved);
-                    } else if (token.front() == '-') {
-                        if (token.size() == 1) {
-                            throw std::invalid_argument("-");
-                        }
-                        const int offset = std::stoi(token.substr(1));
-                        const int resolved = min_zoom - offset;
-                        if (resolved < 0) {
-                            std::cerr << "Requested level " << token
-                                      << " is below zero after applying the relative offset." << std::endl;
-                            return EXIT_FAILURE;
-                        }
-                        add_level(resolved);
-                    } else {
-                        const int resolved = std::stoi(token);
-                        add_level(resolved);
-                    }
-                }
-            } catch (const std::invalid_argument &) {
-                std::cerr << "Invalid zoom level specified in --levels." << std::endl;
-                return EXIT_FAILURE;
-            } catch (const std::out_of_range &) {
-                std::cerr << "Zoom level value is out of range." << std::endl;
-                return EXIT_FAILURE;
-            } catch (const std::runtime_error &) {
-                return EXIT_FAILURE;
-            }
+            // try {
+            //     if (resize_levels_raw.empty()) {
+            //         if (min_zoom <= 0) {
+            //             std::cerr << "Cannot generate a lower zoom level because the minimum zoom is " << min_zoom
+            //                       << " and zoom levels cannot be negative." << std::endl;
+            //             return EXIT_FAILURE;
+            //         }
+            //         add_level(min_zoom - 1);
+            //     }
+            //     for (const auto &token : resize_levels_raw) {
+            //         if (token.empty()) {
+            //             continue;
+            //         }
+            //         if (token.front() == '+') {
+            //             if (token.size() == 1) {
+            //                 throw std::invalid_argument("+");
+            //             }
+            //             const int offset = std::stoi(token.substr(1));
+            //             const int resolved = max_zoom + offset;
+            //             add_level(resolved);
+            //         } else if (token.front() == '-') {
+            //             if (token.size() == 1) {
+            //                 throw std::invalid_argument("-");
+            //             }
+            //             const int offset = std::stoi(token.substr(1));
+            //             const int resolved = min_zoom - offset;
+            //             if (resolved < 0) {
+            //                 std::cerr << "Requested level " << token
+            //                           << " is below zero after applying the relative offset." << std::endl;
+            //                 return EXIT_FAILURE;
+            //             }
+            //             add_level(resolved);
+            //         } else {
+            //             const int resolved = std::stoi(token);
+            //             add_level(resolved);
+            //         }
+            //     }
+            // } catch (const std::invalid_argument &) {
+            //     std::cerr << "Invalid zoom level specified in --levels." << std::endl;
+            //     return EXIT_FAILURE;
+            // } catch (const std::out_of_range &) {
+            //     std::cerr << "Zoom level value is out of range." << std::endl;
+            //     return EXIT_FAILURE;
+            // } catch (const std::runtime_error &) {
+            //     return EXIT_FAILURE;
+            // }
 
-            for (int level : target_levels) {
-                if (level > max_zoom) {
-                    std::cerr << "Warning: requested zoom level " << level
-                              << " is above the source maximum " << max_zoom
-                              << ". Output quality may be reduced." << std::endl;
-                }
-            }
+            // for (int level : target_levels) {
+            //     if (level > max_zoom) {
+            //         std::cerr << "Warning: requested zoom level " << level
+            //                   << " is above the source maximum " << max_zoom
+            //                   << ". Output quality may be reduced." << std::endl;
+            //     }
+            // }
 
-            fs::path output_path = resize_output;
-            const bool output_exists = fs::exists(output_path);
-            bool output_is_directory = false;
-            if (output_exists) {
-                output_is_directory = fs::is_directory(output_path);
-            } else {
-                output_is_directory = !output_path.has_extension();
-            }
+            // fs::path output_path = resize_output;
+            // const bool output_exists = fs::exists(output_path);
+            // bool output_is_directory = false;
+            // if (output_exists) {
+            //     output_is_directory = fs::is_directory(output_path);
+            // } else {
+            //     output_is_directory = !output_path.has_extension();
+            // }
 
-            if (output_exists && !resize_yes) {
-                std::cout << "Output path '" << output_path.string() << "' exists. Overwrite? [y/N] ";
-                std::string response;
-                if (!std::getline(std::cin, response)) {
-                    std::cerr << "Aborted." << std::endl;
-                    return EXIT_FAILURE;
-                }
-                const bool accepted = !response.empty() && (response[0] == 'y' || response[0] == 'Y');
-                if (!accepted) {
-                    std::cerr << "Aborted." << std::endl;
-                    return EXIT_FAILURE;
-                }
-                if (!output_is_directory && fs::is_regular_file(output_path)) {
-                    std::error_code remove_ec;
-                    fs::remove(output_path, remove_ec);
-                    if (remove_ec) {
-                        std::cerr << "Failed to remove existing file: " << remove_ec.message() << std::endl;
-                        return EXIT_FAILURE;
-                    }
-                }
-            }
+            // if (output_exists && !resize_yes) {
+            //     std::cout << "Output path '" << output_path.string() << "' exists. Overwrite? [y/N] ";
+            //     std::string response;
+            //     if (!std::getline(std::cin, response)) {
+            //         std::cerr << "Aborted." << std::endl;
+            //         return EXIT_FAILURE;
+            //     }
+            //     const bool accepted = !response.empty() && (response[0] == 'y' || response[0] == 'Y');
+            //     if (!accepted) {
+            //         std::cerr << "Aborted." << std::endl;
+            //         return EXIT_FAILURE;
+            //     }
+            //     if (!output_is_directory && fs::is_regular_file(output_path)) {
+            //         std::error_code remove_ec;
+            //         fs::remove(output_path, remove_ec);
+            //         if (remove_ec) {
+            //             std::cerr << "Failed to remove existing file: " << remove_ec.message() << std::endl;
+            //             return EXIT_FAILURE;
+            //         }
+            //     }
+            // }
 
-            if (!output_is_directory) {
-                if (!output_path.has_extension() || output_path.extension() != ".mbtiles") {
-                    std::cerr << "Output path must be a directory or end with .mbtiles" << std::endl;
-                    return EXIT_FAILURE;
-                }
-                if (pattern_option != nullptr && pattern_option->count() > 0) {
-                    std::cerr << "Warning: the output pattern is ignored when writing to an MBTiles file." << std::endl;
-                }
-            }
+            // if (!output_is_directory) {
+            //     if (!output_path.has_extension() || output_path.extension() != ".mbtiles") {
+            //         std::cerr << "Output path must be a directory or end with .mbtiles" << std::endl;
+            //         return EXIT_FAILURE;
+            //     }
+            //     if (pattern_option != nullptr && pattern_option->count() > 0) {
+            //         std::cerr << "Warning: the output pattern is ignored when writing to an MBTiles file." << std::endl;
+            //     }
+            // }
 
-            mbtiles::ResizeOptions options;
-            options.target_levels = target_levels;
-            options.pattern = resize_pattern;
-            options.grayscale = resize_grayscale;
+            // mbtiles::ResizeOptions options;
+            // options.target_levels = target_levels;
+            // options.pattern = resize_pattern;
+            // options.grayscale = resize_grayscale;
 
-            mbtiles::resize_zoom_levels(resize_input, resize_output, options);
-            return EXIT_SUCCESS;
+            // mbtiles::resize_zoom_levels(resize_input, resize_output, options);
+            // return EXIT_SUCCESS;
         }
 
         if (*metadata_list_cmd) {
-            const auto metadata = mbtiles::read_metadata(metadata_list_path);
+            const auto metadata = mbtiles::MBTiles(metadata_list_path).metadata();
             for (const auto &entry : metadata) {
                 std::cout << entry.first << "=" << entry.second << '\n';
             }
@@ -296,7 +293,7 @@ int main(int argc, char **argv) {
         }
 
         if (*metadata_get_cmd) {
-            const auto metadata = mbtiles::read_metadata(metadata_get_path);
+            const auto metadata = mbtiles::MBTiles(metadata_get_path).metadata();
             auto it = metadata.find(metadata_get_key);
             if (it == metadata.end()) {
                 std::cerr << "Metadata key '" << metadata_get_key << "' not found" << std::endl;
@@ -307,19 +304,16 @@ int main(int argc, char **argv) {
         }
 
         if (*metadata_set_cmd) {
-            mbtiles::write_metadata_entry(metadata_set_path, metadata_set_key, metadata_set_value,
+            mbtiles::MBTiles(metadata_set_path).setMetadata(metadata_set_key, metadata_set_value,
                                           !metadata_no_overwrite);
             return EXIT_SUCCESS;
         }
 
         if (*viewer_cmd) {
-            mbtiles::ViewerOptions options;
-            options.host = viewer_host;
-            options.port = viewer_port;
-            std::cout << "Launching viewer for '" << viewer_path << "' at http://" << options.host << ":"
-                      << options.port << std::endl;
+            std::cout << "Launching viewer for '" << viewer_path << "' at http://" << viewer_host << ":"
+                      << viewer_port << std::endl;
             std::cout << "Press Ctrl+C to stop the server." << std::endl;
-            mbtiles::serve_viewer(viewer_path, options);
+            mbtiles::MBTiles(viewer_path).view(viewer_port, viewer_host);
             return EXIT_SUCCESS;
         }
     } catch (const std::exception &ex) {

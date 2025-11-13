@@ -26,6 +26,8 @@ endif()
 
 add_executable(mbtiles-cli src/cli/main.cpp)
 
+set_target_properties(mbtiles-cli PROPERTIES OUTPUT_NAME mbtiles)
+
 target_include_directories(mbtiles-cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli
 )
