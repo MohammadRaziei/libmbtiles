@@ -1,7 +1,6 @@
 #include "mbtiles.h"
 
 #include "httplib.h"
-#include "sqlite3.h"
 #include "mustache.hpp"
 
 
@@ -105,18 +104,6 @@ std::optional<double> parse_double(const std::string &value) {
     return std::nullopt;
 }
 
-std::optional<int> query_zoom_value(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        return std::nullopt;
-    }
-    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> guard(stmt, sqlite3_finalize);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        return sqlite3_column_int(stmt, 0);
-    }
-    return std::nullopt;
-}
-
 struct CenterInfo {
     double lat = 0.0;
     double lon = 0.0;
@@ -215,10 +202,7 @@ void MBTiles::view(std::uint16_t port, std::string host) {
         min_zoom_value = parse_int(*min_zoom_str);
     }
     if (!min_zoom_value) {
-        min_zoom_value = [&]() -> std::optional<int> {
-            std::lock_guard<std::mutex> lock(db_mutex);
-            return query_zoom_value(_db, "SELECT MIN(zoom_level) FROM tiles");
-        }();
+        min_zoom_value = minZoomLevel();
     }
 
     std::optional<int> max_zoom_value;
@@ -226,10 +210,7 @@ void MBTiles::view(std::uint16_t port, std::string host) {
         max_zoom_value = parse_int(*max_zoom_str);
     }
     if (!max_zoom_value) {
-        max_zoom_value = [&]() -> std::optional<int> {
-            std::lock_guard<std::mutex> lock(db_mutex);
-            return query_zoom_value(_db, "SELECT MAX(zoom_level) FROM tiles");
-        }();
+        max_zoom_value = maxZoomLevel();
     }
 
     int min_zoom = min_zoom_value.value_or(0);
@@ -316,44 +297,21 @@ void MBTiles::view(std::uint16_t port, std::string host) {
                        return;
                    }
 
-                   std::string tile_data;
+                   std::optional<std::string> tile_data;
                    {
                        std::lock_guard<std::mutex> lock(db_mutex);
-                       sqlite3_stmt *stmt = nullptr;
-                       const char *sql =
-                           "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=? LIMIT 1";
-                       if (sqlite3_prepare_v2(_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-                           res.status = 500;
-                           res.set_content("Failed to prepare tile query", "text/plain; charset=utf-8");
-                           return;
-                       }
-
-                       std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> guard(stmt, sqlite3_finalize);
-
-                       const std::int64_t tms_row = max_index - row;
-                       sqlite3_bind_int(stmt, 1, zoom);
-                       sqlite3_bind_int(stmt, 2, column);
-                       sqlite3_bind_int64(stmt, 3, tms_row);
-
-                       if (sqlite3_step(stmt) != SQLITE_ROW) {
-                           res.status = 404;
-                           res.set_content("Tile not found", "text/plain; charset=utf-8");
-                           return;
-                       }
-
-                       const void *blob = sqlite3_column_blob(stmt, 0);
-                       const int size = sqlite3_column_bytes(stmt, 0);
-                       if (blob == nullptr || size <= 0) {
-                           res.status = 404;
-                           res.set_content("Tile is empty", "text/plain; charset=utf-8");
-                           return;
-                       }
-                       tile_data.assign(static_cast<const char *>(blob), static_cast<std::size_t>(size));
+                       tile_data = tileData(zoom, column, row);
                    }
 
-                   const std::string content_type = detect_content_type(tile_data);
+                   if (!tile_data || tile_data->empty()) {
+                       res.status = 404;
+                       res.set_content("Tile not found", "text/plain; charset=utf-8");
+                       return;
+                   }
+
+                   const std::string content_type = detect_content_type(*tile_data);
                    res.set_header("Cache-Control", "no-store, max-age=0");
-                   res.set_content(tile_data, content_type.c_str());
+                   res.set_content(*tile_data, content_type.c_str());
                });
 
     std::cout << "Serving MBTiles viewer for '" << _name << "' on http://" << host << ':'

@@ -39,44 +39,57 @@ int main(int argc, char **argv) {
                              "Output filename pattern using placeholders like {z}, {x}, {y}, {t}, {n}, {XX}, {ext}.")
         ->default_val("{z}/{x}/{y}.{ext}");
 
-    auto grayscale_cmd = app.add_subcommand("convert-gray", "Convert a directory of tiles to grayscale");
-    add_logging_flags(grayscale_cmd);
-    std::string gray_input;
-    std::string gray_output;
-    bool gray_no_recursive = false;
+    auto convert_cmd = app.add_subcommand("convert", "Convert MBTiles by copying, resizing, and changing formats");
+    add_logging_flags(convert_cmd);
+    std::string convert_input;
+    std::string convert_output;
+    std::vector<std::string> convert_levels;
+    bool convert_grayscale = false;
+    std::string convert_format = "default";
+    std::string convert_extract_dir;
+    std::string convert_extract_pattern = "{z}/{x}/{y}.{ext}";
 
-    grayscale_cmd->add_option("input", gray_input, "Input directory containing image tiles")
-        ->required()
-        ->check(CLI::ExistingDirectory);
-    grayscale_cmd->add_option("output", gray_output, "Directory where grayscale tiles will be written")
-        ->required();
-    grayscale_cmd->add_flag("--no-recursive", gray_no_recursive, "Only process files in the top-level directory");
-
-    auto resize_cmd = app.add_subcommand("resize",
-                                         "Resize tiles to generate additional zoom levels or copy existing ones");
-    add_logging_flags(resize_cmd);
-    std::string resize_input;
-    std::string resize_output;
-    std::vector<std::string> resize_levels_raw;
-    std::string resize_pattern = "{z}/{x}/{y}.{ext}";
-    bool resize_yes = false;
-    bool resize_grayscale = false;
-
-    resize_cmd->add_option("mbtiles", resize_input, "Path to the MBTiles file")
+    convert_cmd->add_option("mbtiles", convert_input, "Path to the MBTiles file")
         ->required()
         ->check(CLI::ExistingFile);
-    resize_cmd->add_option("output", resize_output, "Directory or .mbtiles file for the results")
-        ->required();
-    CLI::Option *pattern_option = resize_cmd
-                                       ->add_option("-p,--pattern", resize_pattern,
-                                                    "Output filename pattern when writing to a directory. Uses placeholders like {z}, {x}, {y}, {ext}.")
-                                       ->default_val("{z}/{x}/{y}.{ext}");
-    resize_cmd->add_option("--levels", resize_levels_raw,
-                           "Zoom levels to include. Prefix values with '-' to request levels below the minimum zoom and with '+' to request levels above the maximum zoom. Unprefixed values are treated as absolute zoom levels.")
-        ->expected(-1);
-    resize_cmd->add_flag("-y,--yes", resize_yes, "Overwrite the output if it exists without prompting");
-    resize_cmd->add_flag("--grayscale", resize_grayscale,
-                         "Convert copied and generated tiles to grayscale before writing");
+    CLI::Option *convert_output_opt = convert_cmd->add_option(
+        "--output", convert_output, "Output .mbtiles path. Defaults to '<input>_converted.mbtiles'.");
+    CLI::Validator require_mbtiles_extension = CLI::Validator(
+        [](std::string &value) {
+            namespace fs = std::filesystem;
+            fs::path candidate(value);
+            if (!candidate.has_extension()) {
+                return std::string("output must end with .mbtiles; use --extract for directories");
+            }
+            std::string ext = candidate.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (ext != ".mbtiles") {
+                return std::string("output must end with .mbtiles; use --extract for directories");
+            }
+            return std::string();
+        },
+        "MBTilesPath");
+    convert_output_opt->check(require_mbtiles_extension);
+    CLI::Option *convert_levels_opt = convert_cmd->add_option(
+        "--zoom-levels", convert_levels,
+        "Zoom levels to include. Use 0 to copy existing levels, prefix '-' for levels below the minimum, and '+' for levels above the maximum.");
+    convert_levels_opt->expected(-1);
+    convert_levels_opt->default_val(std::vector<std::string>{"0"});
+    convert_levels_opt->default_str("0");
+    convert_cmd->add_flag("--grayscale", convert_grayscale, "Convert tiles to grayscale before encoding");
+    convert_cmd->add_option("--format", convert_format, "Output format: default, jpg, or png")
+        ->default_val("default")
+        ->check(CLI::IsMember({"default", "jpg", "jpeg", "png"}, CLI::ignore_case));
+    CLI::Option *convert_extract_opt = convert_cmd->add_option(
+        "--extract", convert_extract_dir,
+        "Extract the converted archive to this directory after conversion");
+    CLI::Option *convert_extract_pattern_opt = convert_cmd->add_option(
+        "-p,--pattern", convert_extract_pattern,
+        "Filename pattern for extracted tiles (e.g., {z}/{x}/{y}.{ext})")
+                                                            ->default_val("{z}/{x}/{y}.{ext}");
+    convert_extract_pattern_opt->needs(convert_extract_opt);
 
     auto metadata_cmd = app.add_subcommand("metadata", "Inspect and update MBTiles metadata");
     metadata_cmd->require_subcommand(1);
@@ -147,141 +160,63 @@ int main(int argc, char **argv) {
             return EXIT_SUCCESS;
         }
 
-        if (*grayscale_cmd) {
-            mbtiles::GrayscaleOptions options;
-            options.recursive = !gray_no_recursive;
-            // mbtiles::convert_directory_to_grayscale(gray_input, gray_output, options);
+        if (*convert_cmd) {
+            auto normalize_format = [](std::string value) {
+                std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+                if (value == "jpeg") {
+                    value = "jpg";
+                }
+                return value;
+            };
+
+            mbtiles::ConvertOptions options;
+            if (convert_levels.empty()) {
+                options.zoom_levels = {"0"};
+            } else {
+                options.zoom_levels = convert_levels;
+            }
+            options.grayscale = convert_grayscale;
+            options.run_extract = convert_extract_opt->count() > 0;
+
+            const std::string format_lower = normalize_format(convert_format);
+            if (format_lower == "png") {
+                options.format = mbtiles::Format::PNG;
+            } else if (format_lower == "jpg") {
+                options.format = mbtiles::Format::JPG;
+            } else {
+                options.format = mbtiles::Format::DEFAULT;
+            }
+
+            mbtiles::MBTiles mb(convert_input);
+            auto converted = mb.convert(options);
+
+            namespace fs = std::filesystem;
+            auto build_default_output = [&]() {
+                fs::path input_path(convert_input);
+                fs::path base_dir = input_path.has_parent_path() ? input_path.parent_path() : fs::current_path();
+                std::string stem = input_path.stem().string();
+                if (stem.empty()) {
+                    stem = "converted";
+                }
+                fs::path candidate = base_dir / (stem + "_converted.mbtiles");
+                int suffix = 1;
+                while (fs::exists(candidate)) {
+                    candidate = base_dir / (stem + "_converted_" + std::to_string(suffix++) + ".mbtiles");
+                }
+                return candidate;
+            };
+
+            fs::path output_path = convert_output_opt->count() > 0 ? fs::path(convert_output) : build_default_output();
+            converted.saveTo(output_path.string());
+            std::cout << "Converted MBTiles written to '" << output_path.string() << "'" << std::endl;
+
+            if (convert_extract_opt->count() > 0) {
+                const auto extracted = converted.extract(convert_extract_dir, convert_extract_pattern);
+                std::cout << "Extracted " << extracted << " tiles to '" << convert_extract_dir << "'" << std::endl;
+            }
             return EXIT_SUCCESS;
-        }
-
-        if (*resize_cmd) {
-            // namespace fs = std::filesystem;
-
-            // const auto existing_levels = mbtiles::list_zoom_levels(resize_input);
-            // if (existing_levels.empty()) {
-            //     std::cerr << "No tiles found in the source archive." << std::endl;
-            //     return EXIT_FAILURE;
-            // }
-
-            // const int min_zoom = *std::min_element(existing_levels.begin(), existing_levels.end());
-            // const int max_zoom = *std::max_element(existing_levels.begin(), existing_levels.end());
-
-            // std::vector<int> target_levels;
-            // std::unordered_set<int> seen_levels;
-
-            // auto add_level = [&](int level) {
-            //     if (level < 0) {
-            //         std::cerr << "Requested zoom level " << level << " is below zero." << std::endl;
-            //         throw std::runtime_error("invalid zoom");
-            //     }
-            //     if (seen_levels.insert(level).second) {
-            //         target_levels.push_back(level);
-            //     }
-            // };
-
-            // try {
-            //     if (resize_levels_raw.empty()) {
-            //         if (min_zoom <= 0) {
-            //             std::cerr << "Cannot generate a lower zoom level because the minimum zoom is " << min_zoom
-            //                       << " and zoom levels cannot be negative." << std::endl;
-            //             return EXIT_FAILURE;
-            //         }
-            //         add_level(min_zoom - 1);
-            //     }
-            //     for (const auto &token : resize_levels_raw) {
-            //         if (token.empty()) {
-            //             continue;
-            //         }
-            //         if (token.front() == '+') {
-            //             if (token.size() == 1) {
-            //                 throw std::invalid_argument("+");
-            //             }
-            //             const int offset = std::stoi(token.substr(1));
-            //             const int resolved = max_zoom + offset;
-            //             add_level(resolved);
-            //         } else if (token.front() == '-') {
-            //             if (token.size() == 1) {
-            //                 throw std::invalid_argument("-");
-            //             }
-            //             const int offset = std::stoi(token.substr(1));
-            //             const int resolved = min_zoom - offset;
-            //             if (resolved < 0) {
-            //                 std::cerr << "Requested level " << token
-            //                           << " is below zero after applying the relative offset." << std::endl;
-            //                 return EXIT_FAILURE;
-            //             }
-            //             add_level(resolved);
-            //         } else {
-            //             const int resolved = std::stoi(token);
-            //             add_level(resolved);
-            //         }
-            //     }
-            // } catch (const std::invalid_argument &) {
-            //     std::cerr << "Invalid zoom level specified in --levels." << std::endl;
-            //     return EXIT_FAILURE;
-            // } catch (const std::out_of_range &) {
-            //     std::cerr << "Zoom level value is out of range." << std::endl;
-            //     return EXIT_FAILURE;
-            // } catch (const std::runtime_error &) {
-            //     return EXIT_FAILURE;
-            // }
-
-            // for (int level : target_levels) {
-            //     if (level > max_zoom) {
-            //         std::cerr << "Warning: requested zoom level " << level
-            //                   << " is above the source maximum " << max_zoom
-            //                   << ". Output quality may be reduced." << std::endl;
-            //     }
-            // }
-
-            // fs::path output_path = resize_output;
-            // const bool output_exists = fs::exists(output_path);
-            // bool output_is_directory = false;
-            // if (output_exists) {
-            //     output_is_directory = fs::is_directory(output_path);
-            // } else {
-            //     output_is_directory = !output_path.has_extension();
-            // }
-
-            // if (output_exists && !resize_yes) {
-            //     std::cout << "Output path '" << output_path.string() << "' exists. Overwrite? [y/N] ";
-            //     std::string response;
-            //     if (!std::getline(std::cin, response)) {
-            //         std::cerr << "Aborted." << std::endl;
-            //         return EXIT_FAILURE;
-            //     }
-            //     const bool accepted = !response.empty() && (response[0] == 'y' || response[0] == 'Y');
-            //     if (!accepted) {
-            //         std::cerr << "Aborted." << std::endl;
-            //         return EXIT_FAILURE;
-            //     }
-            //     if (!output_is_directory && fs::is_regular_file(output_path)) {
-            //         std::error_code remove_ec;
-            //         fs::remove(output_path, remove_ec);
-            //         if (remove_ec) {
-            //             std::cerr << "Failed to remove existing file: " << remove_ec.message() << std::endl;
-            //             return EXIT_FAILURE;
-            //         }
-            //     }
-            // }
-
-            // if (!output_is_directory) {
-            //     if (!output_path.has_extension() || output_path.extension() != ".mbtiles") {
-            //         std::cerr << "Output path must be a directory or end with .mbtiles" << std::endl;
-            //         return EXIT_FAILURE;
-            //     }
-            //     if (pattern_option != nullptr && pattern_option->count() > 0) {
-            //         std::cerr << "Warning: the output pattern is ignored when writing to an MBTiles file." << std::endl;
-            //     }
-            // }
-
-            // mbtiles::ResizeOptions options;
-            // options.target_levels = target_levels;
-            // options.pattern = resize_pattern;
-            // options.grayscale = resize_grayscale;
-
-            // mbtiles::resize_zoom_levels(resize_input, resize_output, options);
-            // return EXIT_SUCCESS;
         }
 
         if (*metadata_list_cmd) {

@@ -41,12 +41,16 @@ enum class Format {
 };
 
 struct ConvertOptions {
-    std::vector<int> target_levels = {0};
-    std::string output_mbtiles = "";
-    ExtractOptions extract_options = {}; // only if output_mbtiles is empty  
+    std::vector<std::string> zoom_levels = {"0"};
     bool grayscale = false;
     Format format = Format::DEFAULT;
+    bool run_extract = false;
 };
+
+void logInfo(const std::string &message);
+void logError(const std::string &message);
+void logWarn(const std::string &message);
+void logDebug(const std::string &message);
 
 
 enum class LogLevel {
@@ -79,7 +83,8 @@ class RGBAImage {
 
     void save(const std::filesystem::path& path) const;
 
-    std::vector<unsigned char> encodePng();
+    std::vector<unsigned char> encodePng() const;
+    std::vector<unsigned char> encodeJpg(int quality = 90) const;
 
     void toGrayScale();
 
@@ -129,6 +134,10 @@ class MBTiles {
   public:
     MBTiles();
     MBTiles(const std::string& path);
+    MBTiles(MBTiles&& other) noexcept;
+    MBTiles& operator=(MBTiles&& other) noexcept;
+    MBTiles(const MBTiles&) = delete;
+    MBTiles& operator=(const MBTiles&) = delete;
     ~MBTiles();
     void open(const std::string& path);
     void close();
@@ -137,7 +146,7 @@ class MBTiles {
     std::map<std::string, std::string> metadata() const;
     const std::string& metadata(const std::string& key) const;
     std::vector<std::string> metadataKeys() const;
-    void setMetadata(const std::map<std::string, std::string> &entries, 
+    void setMetadata(const std::map<std::string, std::string> &entries,
         bool overwrite_existing = true);
     void setMetadata(const std::string &key, const std::string &value,
         bool overwrite_existing = true);
@@ -151,9 +160,20 @@ class MBTiles {
 
     void view(std::uint16_t port = 8080, std::string host = "0.0.0.0");
 
+    std::vector<int> zoomLevels() const;
+    std::optional<int> minZoomLevel() const;
+    std::optional<int> maxZoomLevel() const;
+    std::optional<std::string> tileData(int zoom, int x, int y) const;
+
+    MBTiles convert(const ConvertOptions& options) const;
+    void saveTo(const std::string &path) const;
+
   private:
     std::string _name;
     sqlite3 *_db;
+
+    std::optional<int> queryZoomValue(const char *sql) const;
+    std::optional<std::string> fetchTileBlob(int zoom, int x, int y) const;
 };
 
 // std::size_t extract(const std::string &mbtiles_path, const ExtractOptions &options = {});
