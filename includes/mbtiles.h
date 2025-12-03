@@ -17,6 +17,8 @@ class sqlite3_stmt;
 
 namespace mbtiles {
 
+constexpr int ITER_ALL_ZOOMS {-1};
+
 class mbtiles_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -44,28 +46,33 @@ struct ConvertOptions {
     std::vector<std::string> zoom_levels = {"0"};
     bool grayscale = false;
     Format format = Format::DEFAULT;
-    bool run_extract = false;
 };
 
-void logInfo(const std::string &message);
-void logError(const std::string &message);
-void logWarn(const std::string &message);
-void logDebug(const std::string &message);
 
 
-enum class LogLevel {
-    Trace,
-    DEBUG,
-    INFO,
-    WARNING,
-    ERROR,
-    FATAL
-};
+
+
 
 class Logger {
 public:
-    static void set_level(LogLevel level);
-    static LogLevel level();
+    enum class Level {
+        TRACE,
+        DEBUG,
+        INFO,
+        WARNING,
+        ERROR,
+        FATAL
+    };
+    static void setLevel(Level level);
+    static void setLevel(const std::string& level);
+    static Level level();
+
+
+    static void info(const std::string &message);
+    static void error(const std::string &message);
+    static void warn(const std::string &message);
+    static void debug(const std::string &message);
+    static void trace(const std::string &message);
 
 private:
     struct Impl;
@@ -99,7 +106,7 @@ struct TileInfo {
     int x = 0;
     int y = 0;          // XYZ / Web Mercator Y
     int tms_y = 0;      // TMS Y as stored in MBTiles DB
-    std::vector<std::byte> data;  // raw tile blob (e.g., PNG/JPG/PBF)
+    std::vector<unsigned char> data;  // raw tile blob (e.g., PNG/JPG/PBF)
     std::string extension;        // "png", "jpg", "pbf", etc.
 
     // Compute latitude/longitude bounds on demand (no storage overhead)
@@ -107,6 +114,8 @@ struct TileInfo {
     double latMax() const;
     double lonMin() const;
     double lonMax() const;
+
+    RGBAImage image() const;
 };
 
 std::pair<double, double> tile2latlon(int zoom, int x, int y);
@@ -116,15 +125,19 @@ std::pair<double, double> tile2latlon(const TileInfo& tile);
 
 class TileIterator {
 public:
-    explicit TileIterator(sqlite3* db);
+    explicit TileIterator(sqlite3* db, int zoom = ITER_ALL_ZOOMS);
     ~TileIterator();
 
     // Returns the next tile, or std::nullopt if done.
     // Throws on database error.
     std::optional<TileInfo> next();
 
+    // Reset iterator to start from the beginning.
+    void reset();
+
 private:
     sqlite3* _db;
+    int _zoom = -1;
     sqlite3_stmt* _stmt = nullptr;
     bool _started = false;
     std::string _metadata_ext;
@@ -151,11 +164,7 @@ class MBTiles {
     void setMetadata(const std::string &key, const std::string &value,
         bool overwrite_existing = true);
 
-    TileIterator tiles() const;
-
-
-
-    // TileMap loadLevelRgba(int zoom);
+    TileIterator tiles(int zoom = ITER_ALL_ZOOMS) const;
 
 
     void view(std::uint16_t port = 8080, std::string host = "0.0.0.0");
@@ -164,9 +173,11 @@ class MBTiles {
     std::optional<int> minZoomLevel() const;
     std::optional<int> maxZoomLevel() const;
     std::optional<std::string> tileData(int zoom, int x, int y) const;
+    void writeTileData(int zoom, int x, int y, const unsigned char* data, int size);
 
-    MBTiles convert(const ConvertOptions& options) const;
-    void saveTo(const std::string &path) const;
+
+    void convert(const ConvertOptions& options);
+    void save(const std::string &path) const;
 
   private:
     std::string _name;

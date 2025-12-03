@@ -16,11 +16,10 @@ int main(int argc, char **argv) {
     CLI::App app{"libmbtiles command line interface"};
     app.require_subcommand(1);
 
-    int verbosity = 0;
+    std::string loglevel = "info";
     auto add_logging_flags = [&](CLI::App *cmd) {
-        cmd->add_flag("-v,--verbose", verbosity, "Increase logging verbosity");
-        cmd->add_flag_function("--verbose-extra", [&](int count) { verbosity += count * 2; },
-                               "Enable extra verbose logging");
+        cmd->add_option("-l,--loglevel", loglevel, "set logging level")
+           ->default_str("info");
     };
 
     auto extract_cmd = app.add_subcommand("extract", "Extract tiles from an MBTiles archive");
@@ -131,7 +130,7 @@ int main(int argc, char **argv) {
     auto viewer_cmd = app.add_subcommand("view", "Launch a local web viewer for an MBTiles archive");
     add_logging_flags(viewer_cmd);
     std::string viewer_path;
-    std::string viewer_host = "127.0.0.1";
+    std::string viewer_host = "0.0.0.0";
     std::uint16_t viewer_port = 8080;
 
     viewer_cmd->add_option("mbtiles", viewer_path, "Path to the MBTiles file")
@@ -144,13 +143,7 @@ int main(int argc, char **argv) {
 
     CLI11_PARSE(app, argc, argv);
 
-    if (verbosity >= 2) {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::DEBUG);
-    } else if (verbosity == 1) {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::INFO);
-    } else {
-        mbtiles::Logger::set_level(mbtiles::LogLevel::WARNING);
-    }
+    mbtiles::Logger::setLevel(loglevel);
 
     try {
         if (*extract_cmd) {
@@ -178,7 +171,7 @@ int main(int argc, char **argv) {
                 options.zoom_levels = convert_levels;
             }
             options.grayscale = convert_grayscale;
-            options.run_extract = convert_extract_opt->count() > 0;
+            // options.run_extract = convert_extract_opt->count() > 0;
 
             const std::string format_lower = normalize_format(convert_format);
             if (format_lower == "png") {
@@ -190,7 +183,7 @@ int main(int argc, char **argv) {
             }
 
             mbtiles::MBTiles mb(convert_input);
-            auto converted = mb.convert(options);
+            mb.convert(options);
 
             namespace fs = std::filesystem;
             auto build_default_output = [&]() {
@@ -209,11 +202,11 @@ int main(int argc, char **argv) {
             };
 
             fs::path output_path = convert_output_opt->count() > 0 ? fs::path(convert_output) : build_default_output();
-            converted.saveTo(output_path.string());
+            mb.save(output_path.string());
             std::cout << "Converted MBTiles written to '" << output_path.string() << "'" << std::endl;
 
             if (convert_extract_opt->count() > 0) {
-                const auto extracted = converted.extract(convert_extract_dir, convert_extract_pattern);
+                const auto extracted = mb.extract(convert_extract_dir, convert_extract_pattern);
                 std::cout << "Extracted " << extracted << " tiles to '" << convert_extract_dir << "'" << std::endl;
             }
             return EXIT_SUCCESS;
